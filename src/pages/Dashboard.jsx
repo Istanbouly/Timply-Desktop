@@ -3,8 +3,9 @@ import { api } from '../lib/api';
 import { useRealtimeSSE } from '../lib/useRealtimeSSE';
 import {
   ChevronLeft, ChevronRight, CalendarDays, RefreshCw,
-  LogOut, X
+  LogOut, X, Settings as SettingsIcon, Bell
 } from 'lucide-react';
+import Settings from './Settings';
 
 // ── Constants ─────────────────────────────────────────────────────
 const SLOT_MINS       = 30;
@@ -69,6 +70,101 @@ function avatarColor(name = '') {
   return AVATAR_COLORS[s % AVATAR_COLORS.length];
 }
 
+// ── Date picker ───────────────────────────────────────────────────
+const DP_MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DP_MONTHS_FULL  = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DP_DAYS         = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+function DatePickerPopup({ value, onChange, onClose }) {
+  const now   = new Date();
+  const [mode, setMode]       = useState('day');
+  const [viewYear, setViewYear]   = useState((value || now).getFullYear());
+  const [viewMonth, setViewMonth] = useState((value || now).getMonth());
+
+  const tY = now.getFullYear(), tM = now.getMonth(), tD = now.getDate();
+  const sY = value?.getFullYear(), sM = value?.getMonth(), sD = value?.getDate();
+
+  // year grid: 12-year pages
+  const yearBase = Math.floor(viewYear / 12) * 12;
+
+  // day grid cells
+  const firstDow   = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const cells = [...Array(firstDow).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+
+  const btn = 'flex items-center justify-center rounded-lg text-xs font-medium transition-colors';
+
+  function prevMonth() { viewMonth === 0 ? (setViewMonth(11), setViewYear(y => y-1)) : setViewMonth(m => m-1); }
+  function nextMonth() { viewMonth === 11 ? (setViewMonth(0),  setViewYear(y => y+1)) : setViewMonth(m => m+1); }
+
+  return (
+    <div className="bg-stone-900 border border-stone-700/60 rounded-2xl shadow-2xl p-4 w-64 select-none">
+
+      {/* ── Year mode ── */}
+      {mode === 'year' && (<>
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={() => setViewYear(y => y-12)} className="p-1.5 rounded-lg hover:bg-stone-700 text-stone-400 transition-colors"><ChevronLeft size={13}/></button>
+          <span className="text-[11px] font-semibold text-stone-300">{yearBase} – {yearBase+11}</span>
+          <button onClick={() => setViewYear(y => y+12)} className="p-1.5 rounded-lg hover:bg-stone-700 text-stone-400 transition-colors"><ChevronRight size={13}/></button>
+        </div>
+        <div className="grid grid-cols-4 gap-1">
+          {Array.from({ length: 12 }, (_, i) => yearBase + i).map(y => (
+            <button key={y} onClick={() => { setViewYear(y); setMode('month'); }}
+              className={`${btn} h-9 ${y === sY ? 'bg-[#C9A96E] text-stone-900' : y === tY ? 'text-[#C9A96E] hover:bg-stone-700' : 'text-stone-300 hover:bg-stone-700'}`}>
+              {y}
+            </button>
+          ))}
+        </div>
+      </>)}
+
+      {/* ── Month mode ── */}
+      {mode === 'month' && (<>
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={() => setViewYear(y => y-1)} className="p-1.5 rounded-lg hover:bg-stone-700 text-stone-400 transition-colors"><ChevronLeft size={13}/></button>
+          <button onClick={() => setMode('year')} className="text-[11px] font-semibold text-[#C9A96E] hover:text-[#d4b87e] transition-colors">{viewYear}</button>
+          <button onClick={() => setViewYear(y => y+1)} className="p-1.5 rounded-lg hover:bg-stone-700 text-stone-400 transition-colors"><ChevronRight size={13}/></button>
+        </div>
+        <div className="grid grid-cols-4 gap-1">
+          {DP_MONTHS_SHORT.map((m, i) => (
+            <button key={m} onClick={() => { setViewMonth(i); setMode('day'); }}
+              className={`${btn} h-9 ${i === sM && viewYear === sY ? 'bg-[#C9A96E] text-stone-900' : i === tM && viewYear === tY ? 'text-[#C9A96E] hover:bg-stone-700' : 'text-stone-300 hover:bg-stone-700'}`}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </>)}
+
+      {/* ── Day mode ── */}
+      {mode === 'day' && (<>
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={prevMonth} className="p-1.5 rounded-lg hover:bg-stone-700 text-stone-400 transition-colors"><ChevronLeft size={13}/></button>
+          <button onClick={() => setMode('month')} className="text-[11px] font-semibold text-[#C9A96E] hover:text-[#d4b87e] transition-colors">
+            {DP_MONTHS_FULL[viewMonth]} {viewYear}
+          </button>
+          <button onClick={nextMonth} className="p-1.5 rounded-lg hover:bg-stone-700 text-stone-400 transition-colors"><ChevronRight size={13}/></button>
+        </div>
+        <div className="grid grid-cols-7 mb-1">
+          {DP_DAYS.map(d => <div key={d} className="flex items-center justify-center text-[10px] font-semibold text-stone-500 h-6">{d}</div>)}
+        </div>
+        <div className="grid grid-cols-7 gap-y-0.5">
+          {cells.map((day, i) => !day ? <div key={`e-${i}`}/> : (
+            <button key={day}
+              onClick={() => { onChange(new Date(viewYear, viewMonth, day)); onClose(); }}
+              className={`${btn} h-8 w-full ${
+                day === sD && viewMonth === sM && viewYear === sY ? 'bg-[#C9A96E] text-stone-900' :
+                day === tD && viewMonth === tM && viewYear === tY ? 'text-[#C9A96E] ring-1 ring-[#C9A96E]/60 hover:bg-stone-700' :
+                'text-stone-300 hover:bg-stone-700'
+              }`}>
+              {day}
+            </button>
+          ))}
+        </div>
+      </>)}
+
+    </div>
+  );
+}
+
 // ── Status styles ─────────────────────────────────────────────────
 const STATUS_BLOCK = {
   confirmed: 'bg-emerald-50 border-emerald-500 text-emerald-900',
@@ -101,6 +197,7 @@ function BookingBlock({ booking, selected, onSelect }) {
   return (
     <div
       className="absolute left-1 right-1"
+      data-booking-id={booking.id}
       style={{ top: topPx, height: servicePx + bufferPx, zIndex: isSelected ? 5 : 1 }}
       onClick={(e) => { e.stopPropagation(); onSelect(booking); }}
     >
@@ -899,11 +996,22 @@ function BookingDetailPanel({ booking, staffColumns = [], onClose, onUpdated }) 
   // Reschedule
   const [rescheduling, setRescheduling]     = useState(false);
   const [rescheduleDate, setRescheduleDate] = useState('');
+  const [reschedPickerOpen, setReschedPickerOpen] = useState(false);
+  const reschedPickerRef                    = useRef(null);
   const [slots, setSlots]                   = useState([]);
   const [slotsMessage, setSlotsMessage]     = useState('');
   const [slotsLoading, setSlotsLoading]     = useState(false);
   const [selectedSlot, setSelectedSlot]     = useState(null);
   const [findingNextDate, setFindingNextDate] = useState(false);
+
+  useEffect(() => {
+    if (!reschedPickerOpen) return;
+    function handleClick(e) {
+      if (!reschedPickerRef.current?.contains(e.target)) setReschedPickerOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [reschedPickerOpen]);
 
   useEffect(() => {
     setNotes([]); setNotesLoading(true);
@@ -1121,13 +1229,35 @@ function BookingDetailPanel({ booking, staffColumns = [], onClose, onUpdated }) 
                   {findingNextDate ? 'Finding…' : 'Next available →'}
                 </button>
               </div>
-              <input
-                type="date"
-                value={rescheduleDate}
-                min={todayStr2}
-                onChange={e => { setRescheduleDate(e.target.value); setActionError(''); loadSlots(e.target.value); }}
-                className="w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-800 focus:border-[#C9A96E] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition"
-              />
+              <div ref={reschedPickerRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setReschedPickerOpen(o => !o)}
+                  className="w-full flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-800 hover:border-[#C9A96E]/50 hover:bg-white transition text-left"
+                >
+                  <span className={rescheduleDate ? 'text-stone-800' : 'text-stone-400'}>
+                    {rescheduleDate
+                      ? new Date(rescheduleDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+                      : 'Select a date'}
+                  </span>
+                  <CalendarDays size={13} className="text-stone-400 shrink-0" />
+                </button>
+                {reschedPickerOpen && (
+                  <div className="absolute top-full left-0 mt-2 z-50">
+                    <DatePickerPopup
+                      value={rescheduleDate ? new Date(rescheduleDate + 'T00:00:00') : null}
+                      onChange={d => {
+                        const str = toDateStr(d);
+                        setRescheduleDate(str);
+                        setActionError('');
+                        loadSlots(str);
+                        setReschedPickerOpen(false);
+                      }}
+                      onClose={() => setReschedPickerOpen(false)}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
 
             {slotsLoading && <p className="text-xs text-stone-400">Loading slots…</p>}
@@ -1646,9 +1776,10 @@ function ToastItem({ toast: { id, booking, type }, onDismiss }) {
 
 function ToastStack({ toasts, onDismiss }) {
   if (toasts.length === 0) return null;
+  const visible = toasts.slice(-5); // show only the 5 most recent
   return (
-    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2">
-      {toasts.map(t => <ToastItem key={t.id} toast={t} onDismiss={() => onDismiss(t.id)} />)}
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-h-[324px] overflow-y-auto">
+      {visible.map(t => <ToastItem key={t.id} toast={t} onDismiss={() => onDismiss(t.id)} />)}
     </div>
   );
 }
@@ -1660,8 +1791,58 @@ function playNotificationSound() {
   } catch {}
 }
 
+// ── Notification helpers ──────────────────────────────────────────
+const NOTIF_CONFIG = {
+  new:        { label: 'New booking',         dot: 'bg-[#C9A96E]' },
+  pending:    { label: 'Pending approval',    dot: 'bg-amber-400'  },
+  cancelled:  { label: 'Booking cancelled',   dot: 'bg-red-400'    },
+  rescheduled:{ label: 'Booking rescheduled', dot: 'bg-sky-400'    },
+  confirmed:  { label: 'Booking confirmed',   dot: 'bg-emerald-400'},
+};
+
+function NotifRow({ notif, onClick }) {
+  const cfg = NOTIF_CONFIG[notif.type] || NOTIF_CONFIG.new;
+  const dateLabel = notif.date
+    ? new Date(notif.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+    : '';
+  const timeLabel = notif.startTime ? formatTime(notif.startTime) : '';
+  return (
+    <button
+      onClick={() => onClick(notif)}
+      className={`w-full flex items-start gap-3 px-4 py-3 transition-colors text-left border-b border-stone-100 last:border-0 ${notif.unread ? 'bg-stone-50 hover:bg-stone-100' : 'bg-white hover:bg-stone-50'}`}
+    >
+      {notif.unread && <div className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${cfg.dot}`} />}
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-semibold text-stone-800">{cfg.label}</p>
+        <p className="text-[11px] text-stone-500 truncate mt-0.5">
+          {notif.callerName}{dateLabel ? ` · ${dateLabel}` : ''}{timeLabel ? ` at ${timeLabel}` : ''}
+        </p>
+        {notif.type === 'rescheduled' && notif.oldDate && (
+          <p className="text-[10px] text-stone-400 mt-0.5">
+            From {new Date(notif.oldDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            {notif.oldStartTime ? ` at ${formatTime(notif.oldStartTime)}` : ''}
+          </p>
+        )}
+        <p className="text-[10px] text-stone-300 mt-0.5">
+          {new Date(notif.createdAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+        </p>
+      </div>
+    </button>
+  );
+}
+
 // ── Main dashboard ────────────────────────────────────────────────
 export default function Dashboard({ session, onSignOut }) {
+  const [page, setPage]               = useState('calendar'); // 'calendar' | 'settings'
+  const [notifOpen, setNotifOpen]     = useState(false);
+  const [notifList, setNotifList]     = useState([]);
+  const [notifHasMore, setNotifHasMore] = useState(false);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifOffset, setNotifOffset] = useState(0);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const pendingSelectRef              = useRef(null);
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+  const datePickerContainerRef        = useRef(null);
   const [view, setView]               = useState('day');
   const [date, setDate]               = useState(new Date());
   const [bookings, setBookings]       = useState([]);
@@ -1680,6 +1861,7 @@ export default function Dashboard({ session, onSignOut }) {
 
   useEffect(() => {
     api.getProfile().then(p => { setProfile(p); setWeekStaffId(session.user.id); }).catch(() => {});
+    api.getUnreadCount().then(r => setUnreadCount(r?.count || 0)).catch(() => {});
     api.getStaff().then(res => {
       setStaff((res.staff || []).filter(s => s.status === 'active'));
     }).catch(() => {});
@@ -1695,6 +1877,26 @@ export default function Dashboard({ session, onSignOut }) {
     token: session.access_token,
     onEvent: handleSSEEvent,
   });
+
+  // Close notification panel on outside click
+  useEffect(() => {
+    if (!notifOpen) return;
+    function handleClick(e) {
+      if (!e.target.closest('[data-notif-panel]')) setNotifOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [notifOpen]);
+
+  // Close date picker on outside click
+  useEffect(() => {
+    if (!datePickerOpen) return;
+    function handleClick(e) {
+      if (!datePickerContainerRef.current?.contains(e.target)) setDatePickerOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [datePickerOpen]);
 
   const load = useCallback(async (d, v) => {
     setLoading(true);
@@ -1712,6 +1914,24 @@ export default function Dashboard({ session, onSignOut }) {
       } else {
         const res = await api.getBookings({ from: toDateStr(d), to: toDateStr(d), page_size: 500 });
         setBookings((res.bookings || []).filter(b => b.status !== 'cancelled'));
+      }
+      // Auto-select booking if navigated from notification
+      if (pendingSelectRef.current) {
+        const bookingId = pendingSelectRef.current;
+        pendingSelectRef.current = null;
+        setTimeout(() => {
+          setBookings(prev => {
+            const found = prev.find(b => b.id === bookingId);
+            if (found) {
+              setSelected(found);
+              setTimeout(() => {
+                const el = document.querySelector(`[data-booking-id="${bookingId}"]`);
+                el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }, 50);
+            }
+            return prev;
+          });
+        }, 0);
       }
     } catch (err) {
       setError(err.message || 'Failed to load');
@@ -1812,6 +2032,19 @@ export default function Dashboard({ session, onSignOut }) {
       if (recentActionsRef.current.has(`${nb?.id}:insert`)) return; // own creation
       playNotificationSound();
       showToast(nb, nb?.status === 'pending' ? 'pending' : 'new');
+      setUnreadCount(c => c + 1);
+      setNotifList(prev => [{
+        id: `${nb?.id || 'unknown'}-${Date.now()}`,
+        type: nb?.status === 'pending' ? 'pending' : 'new',
+        bookingId: nb?.id,
+        callerName: nb?.caller_name || 'Guest',
+        date: nb?.date,
+        startTime: nb?.start_time?.slice(0, 5),
+        oldDate: null,
+        oldStartTime: null,
+        createdAt: new Date().toISOString(),
+        unread: true,
+      }, ...prev]);
       if (nb?.date && visibleDates.includes(nb.date)) silentRefresh();
 
     } else if (eventType === 'UPDATE') {
@@ -1821,16 +2054,84 @@ export default function Dashboard({ session, onSignOut }) {
 
       if (newStatus === 'cancelled' && oldStatus !== 'cancelled') {
         showToast(nb, 'cancelled');
+        setUnreadCount(c => c + 1);
+        setNotifList(prev => [{
+          id: `${nb?.id || 'unknown'}-${Date.now()}`,
+          type: 'cancelled',
+          bookingId: nb?.id,
+          callerName: nb?.caller_name || 'Guest',
+          date: nb?.date,
+          startTime: nb?.start_time?.slice(0, 5),
+          oldDate: null,
+          oldStartTime: null,
+          createdAt: new Date().toISOString(),
+          unread: true,
+        }, ...prev]);
         setBookings(prev => prev.filter(b => b.id !== nb.id));
         if (selected?.id === nb.id) setSelected(null);
 
       } else if (nb?.date !== ob?.date || nb?.start_time !== ob?.start_time) {
         playNotificationSound();
         showToast(nb, 'rescheduled');
+        setUnreadCount(c => c + 1);
+        setNotifList(prev => [{
+          id: `${nb?.id || 'unknown'}-${Date.now()}`,
+          type: 'rescheduled',
+          bookingId: nb?.id,
+          callerName: nb?.caller_name || 'Guest',
+          date: nb?.date,
+          startTime: nb?.start_time?.slice(0, 5),
+          oldDate: ob?.date || null,
+          oldStartTime: ob?.start_time?.slice(0, 5) || null,
+          createdAt: new Date().toISOString(),
+          unread: true,
+        }, ...prev]);
         const affected = [nb?.date, ob?.date].filter(Boolean);
         if (affected.some(d => visibleDates.includes(d))) silentRefresh();
       }
     }
+  }
+
+  async function openNotifPanel() {
+    setNotifOpen(true);
+    if (notifList.length > 0) return; // already loaded
+    setNotifLoading(true);
+    try {
+      const res = await api.getNotificationHistory(0, 20);
+      const snap = unreadCount; // how many newest items are unread
+      const notifications = (res.notifications || []).map((n, i) => ({ ...n, unread: i < snap }));
+      setNotifList(notifications);
+      setNotifHasMore(res.hasMore || false);
+      setNotifOffset(20);
+    } catch {}
+    setNotifLoading(false);
+  }
+
+  async function loadMoreNotifs() {
+    if (notifLoading || !notifHasMore) return;
+    setNotifLoading(true);
+    try {
+      const res = await api.getNotificationHistory(notifOffset, 20);
+      setNotifList(prev => [...prev, ...(res.notifications || [])]);
+      setNotifHasMore(res.hasMore || false);
+      setNotifOffset(prev => prev + 20);
+    } catch {}
+    setNotifLoading(false);
+  }
+
+  function handleNotifClick(notif) {
+    setNotifOpen(false);
+    if (notif.unread) {
+      setNotifList(prev => prev.map(n => n.id === notif.id ? { ...n, unread: false } : n));
+      setUnreadCount(c => Math.max(0, c - 1));
+      api.decrementUnreadCount().catch(() => {});
+    }
+    setPage('calendar');
+    if (!notif.date) return;
+    const target = new Date(notif.date + 'T00:00:00');
+    setDate(target);
+    setView('day');
+    if (notif.bookingId) pendingSelectRef.current = notif.bookingId;
   }
 
   function goTo(delta) {
@@ -1863,6 +2164,74 @@ export default function Dashboard({ session, onSignOut }) {
             <span className="text-xs font-medium text-stone-600">{profile.name}</span>
           </div>
         )}
+        {/* Notification bell */}
+        <div className="relative" style={{ WebkitAppRegion: 'no-drag' }} data-notif-panel>
+          <button
+            onClick={() => notifOpen ? setNotifOpen(false) : openNotifPanel()}
+            className={`p-1.5 rounded-lg transition-colors ${notifOpen ? 'bg-stone-900 text-white' : 'text-stone-400 hover:text-stone-700 hover:bg-stone-100'}`}
+            title="Notifications"
+          >
+            <Bell size={14} />
+          </button>
+          {unreadCount > 0 && (
+            <div className="absolute -top-1 -right-1 min-w-[16px] h-4 bg-[#C9A96E] rounded-full flex items-center justify-center px-1 pointer-events-none">
+              <span className="text-[9px] font-bold text-stone-900 leading-none">{unreadCount > 99 ? '99+' : unreadCount}</span>
+            </div>
+          )}
+          {/* Dropdown panel */}
+          {notifOpen && (
+            <div className="absolute right-0 top-9 w-80 bg-white rounded-2xl shadow-2xl border border-stone-200 z-50 overflow-hidden flex flex-col h-[384px]">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-stone-100 shrink-0">
+                <p className="text-sm font-semibold text-stone-800">Notifications</p>
+                <button onClick={() => setNotifOpen(false)} className="text-stone-400 hover:text-stone-600 transition-colors">
+                  <X size={13} />
+                </button>
+              </div>
+              <div
+                className="overflow-y-auto flex-1"
+                onScroll={e => {
+                  const el = e.currentTarget;
+                  if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) loadMoreNotifs();
+                }}
+              >
+                {notifLoading && notifList.length === 0 ? (
+                  <div className="flex items-center justify-center py-10">
+                    <div className="w-4 h-4 border-2 border-stone-200 border-t-[#C9A96E] rounded-full animate-spin" />
+                  </div>
+                ) : notifList.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center px-4">
+                    <Bell size={24} className="text-stone-200 mb-2" />
+                    <p className="text-xs text-stone-400">No notifications yet</p>
+                  </div>
+                ) : (
+                  <>
+                    {notifList.map(n => <NotifRow key={n.id} notif={n} onClick={handleNotifClick} />)}
+                    {notifHasMore && (
+                      <div className="flex items-center justify-center py-3">
+                        {notifLoading
+                          ? <div className="w-4 h-4 border-2 border-stone-200 border-t-[#C9A96E] rounded-full animate-spin" />
+                          : <button onClick={loadMoreNotifs} className="text-xs text-stone-400 hover:text-stone-600">Load more</button>
+                        }
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              <div className="px-4 py-2 border-t border-stone-100 shrink-0">
+                <p className="text-[10px] text-stone-400 text-center">Notifications auto-clear after 48 hours.</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={() => setPage(p => p === 'settings' ? 'calendar' : 'settings')}
+          className={`p-1.5 rounded-lg transition-colors ${page === 'settings' ? 'bg-stone-900 text-white' : 'text-stone-400 hover:text-stone-700 hover:bg-stone-100'}`}
+          title="Settings"
+          style={{ WebkitAppRegion: 'no-drag' }}
+        >
+          <SettingsIcon size={14} />
+        </button>
         <button
           onClick={onSignOut}
           className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors"
@@ -1873,7 +2242,17 @@ export default function Dashboard({ session, onSignOut }) {
         </button>
       </div>
 
+      {/* Settings page */}
+      {page === 'settings' && (
+        <Settings
+          onBack={() => setPage('calendar')}
+          slug={profile?.is_staff_member ? profile?.owner_booking_slug : profile?.booking_slug}
+          profile={profile}
+        />
+      )}
+
       {/* Toolbar */}
+      {page === 'calendar' &&
       <div className="h-11 bg-white border-b border-stone-200 flex items-center px-5 gap-3 shrink-0">
         <div className="flex items-center bg-stone-100 rounded-lg p-0.5">
           {['day', 'week', 'month'].map(v => (
@@ -1899,11 +2278,25 @@ export default function Dashboard({ session, onSignOut }) {
           </button>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          <CalendarDays size={13} className="text-stone-400" />
-          <h1 className="text-xs font-semibold text-stone-700">
-            {view === 'week' ? formatWeekHeading(date) : view === 'month' ? formatMonthHeading(date) : formatHeading(date)}
-          </h1>
+        <div ref={datePickerContainerRef} className="relative">
+          <button
+            onClick={() => setDatePickerOpen(o => !o)}
+            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-stone-100 transition-colors"
+          >
+            <CalendarDays size={13} className="text-stone-400" />
+            <h1 className="text-xs font-semibold text-stone-700">
+              {view === 'week' ? formatWeekHeading(date) : view === 'month' ? formatMonthHeading(date) : formatHeading(date)}
+            </h1>
+          </button>
+          {datePickerOpen && (
+            <div className="absolute top-full left-0 mt-2 z-50">
+              <DatePickerPopup
+                value={date}
+                onChange={d => { setDate(d); setDatePickerOpen(false); }}
+                onClose={() => setDatePickerOpen(false)}
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex-1" />
@@ -1931,9 +2324,10 @@ export default function Dashboard({ session, onSignOut }) {
         >
           <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
         </button>
-      </div>
+      </div>}
 
       {/* Body */}
+      {page === 'calendar' &&
       <div className="flex-1 flex overflow-hidden">
 
         {/* Calendar area */}
@@ -2024,7 +2418,7 @@ export default function Dashboard({ session, onSignOut }) {
             // If it's on a different date, do nothing — user will see it when they navigate there.
           }}
         />
-      </div>
+      </div>}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>

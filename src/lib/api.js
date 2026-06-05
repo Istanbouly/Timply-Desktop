@@ -49,7 +49,8 @@ export const api = {
   },
   getMonthlyBookingCounts: (from, to) =>
     request('GET', `/bookings/monthly-counts?from=${from}&to=${to}`),
-  getAvailabilitySettings: ()       => request('GET',  '/availability'),
+  getAvailabilitySettings: ()       => request('GET',  '/availability/settings'),
+  getHolidays: ()                   => request('GET',  '/holidays'),
   getStaff: ()                      => request('GET',  '/staff'),
   updateBooking: (id, data)         => request('PATCH', `/bookings/${id}`, data),
   cancelBooking: (id, reason)       => request('DELETE', `/bookings/${id}`, { cancellation_reason: reason }),
@@ -77,4 +78,9 @@ export const api = {
     request('GET', `/availability/next-available?event_type_id=${eventTypeId}`),
   getEventTypes: () => request('GET', '/event-types'),
   createBooking: (data) => request('POST', '/bookings', data),
+  getUnreadCount: () => request('GET', '/notifications/unread'),
+  getNotificationHistory: (offset = 0, limit = 20) =>
+    request('GET', `/notifications/history?offset=${offset}&limit=${limit}`),
+  resetUnreadCount: () => request('POST', '/notifications/unread/reset'),
+  decrementUnreadCount: () => request('POST', '/notifications/unread/decrement'),
 };
