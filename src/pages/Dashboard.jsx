@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../lib/api';
+import { useRealtimeSSE } from '../lib/useRealtimeSSE';
 import {
   ChevronLeft, ChevronRight, CalendarDays, RefreshCw,
   LogOut, X
@@ -151,7 +152,7 @@ function NowIndicator() {
 }
 
 // ── Staff day grid ────────────────────────────────────────────────
-function StaffDayGrid({ columns, bookings, selected, onSelectBooking, staffPage, setStaffPage }) {
+function StaffDayGrid({ columns, bookings, selected, onSelectBooking, staffPage, setStaffPage, date: dateStr, onSlotClick }) {
   const [hoverSlot, setHoverSlot] = useState(null);
   const bodyRef = useRef(null);
   const todayStr = toDateStr(new Date());
@@ -269,7 +270,22 @@ function StaffDayGrid({ columns, bookings, selected, onSelectBooking, staffPage,
               return e > GRID_START && s < GRID_END;
             });
             return (
-              <div key={col.id} className="flex-1 min-w-0 border-l border-stone-100 relative" style={{ height: gridHeight }}>
+              <div
+                key={col.id}
+                className={`flex-1 min-w-0 border-l border-stone-100 relative ${onSlotClick ? 'cursor-pointer' : ''}`}
+                style={{ height: gridHeight }}
+                onClick={(e) => {
+                  if (!onSlotClick || !dateStr) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const slotIndex = Math.floor((e.clientY - rect.top) / ROW_HEIGHT);
+                  const mins = GRID_START + slotIndex * SLOT_MINS;
+                  if (mins >= GRID_START && mins < GRID_END) {
+                    const h = String(Math.floor(mins / 60)).padStart(2, '0');
+                    const m = String(mins % 60).padStart(2, '0');
+                    onSlotClick({ date: dateStr, time: `${h}:${m}`, userId: col.id });
+                  }
+                }}
+              >
                 {TIME_LABELS.map((label, i) => (
                   <div key={label} className={`absolute left-0 right-0 ${label.endsWith(':00') ? 'border-t border-stone-200' : 'border-t border-stone-100'}`} style={{ top: i * ROW_HEIGHT }} />
                 ))}
@@ -287,7 +303,7 @@ function StaffDayGrid({ columns, bookings, selected, onSelectBooking, staffPage,
 }
 
 // ── Week grid ─────────────────────────────────────────────────────
-function WeekGrid({ days, bookings, selected, onSelectBooking }) {
+function WeekGrid({ days, bookings, selected, onSelectBooking, onSlotClick }) {
   const [hoverSlot, setHoverSlot] = useState(null);
   const bodyRef = useRef(null);
   const todayStr = toDateStr(new Date());
@@ -362,7 +378,22 @@ function WeekGrid({ days, bookings, selected, onSelectBooking }) {
               return e > GRID_START && s < GRID_END;
             });
             return (
-              <div key={dateStr} className={`flex-1 min-w-0 border-l border-stone-100 relative ${today ? 'bg-[#C9A96E]/[0.02]' : ''}`} style={{ height: gridHeight }}>
+              <div
+                key={dateStr}
+                className={`flex-1 min-w-0 border-l border-stone-100 relative ${today ? 'bg-[#C9A96E]/[0.02]' : ''} ${onSlotClick ? 'cursor-pointer' : ''}`}
+                style={{ height: gridHeight }}
+                onClick={(e) => {
+                  if (!onSlotClick) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const slotIndex = Math.floor((e.clientY - rect.top) / ROW_HEIGHT);
+                  const mins = GRID_START + slotIndex * SLOT_MINS;
+                  if (mins >= GRID_START && mins < GRID_END) {
+                    const h = String(Math.floor(mins / 60)).padStart(2, '0');
+                    const m = String(mins % 60).padStart(2, '0');
+                    onSlotClick({ date: dateStr, time: `${h}:${m}` });
+                  }
+                }}
+              >
                 {TIME_LABELS.map((label, i) => (
                   <div key={label} className={`absolute left-0 right-0 ${label.endsWith(':00') ? 'border-t border-stone-200' : 'border-t border-stone-100'}`} style={{ top: i * ROW_HEIGHT }} />
                 ))}
@@ -427,8 +458,324 @@ function MonthGrid({ year, month, counts, onDayClick }) {
   );
 }
 
+// ── New appointment panel ─────────────────────────────────────────
+function NewAppointmentPanel({ slot, staffColumns, ownerUserId, dayBookings, onClose, onCreated }) {
+  const [eventTypes, setEventTypes]     = useState([]);
+  const [etLoading, setEtLoading]       = useState(true);
+  const [selectedEts, setSelectedEts]   = useState([]);  // multi-select array
+  const [callerName, setCallerName]     = useState('');
+  const [callerPhone, setCallerPhone]   = useState('');
+  const [callerEmail, setCallerEmail]   = useState('');
+  const [notes, setNotes]               = useState('');
+  const [submitting, setSubmitting]     = useState(false);
+  const [error, setError]               = useState('');
+  const [effectiveSlot, setEffectiveSlot] = useState(slot);
+  const [findingNext, setFindingNext]   = useState(false);
+
+  // Reset effective slot when user clicks a different cell
+  useEffect(() => { setEffectiveSlot(slot); }, [slot.date, slot.time, slot.userId]);
+
+  useEffect(() => {
+    api.getEventTypes()
+      .then(data => { setEventTypes((data || []).filter(et => et.active !== false)); })
+      .catch(() => {})
+      .finally(() => setEtLoading(false));
+  }, []);
+
+  function toggleEt(et) {
+    setSelectedEts(prev =>
+      prev.some(e => e.id === et.id) ? prev.filter(e => e.id !== et.id) : [...prev, et]
+    );
+  }
+
+  // ── Duration math ─────────────────────────────────────────────
+  const totalDuration = selectedEts.reduce((s, et) => s + et.duration_minutes, 0);
+  const maxBuffer     = selectedEts.length > 0 ? Math.max(...selectedEts.map(et => et.buffer_minutes || 0)) : 0;
+  const totalMins     = totalDuration + maxBuffer;
+
+  function minsToTime(m) {
+    return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  }
+
+  const slotStartMins = timeToMins(effectiveSlot.time);
+  const slotEndMins   = selectedEts.length > 0 ? slotStartMins + totalMins : null;
+  const endTimeStr    = slotEndMins !== null ? minsToTime(slotEndMins) : null;
+
+  // ── Overlap check against loaded bookings for the clicked day ──
+  // Only check when the effective slot is still the originally-clicked date;
+  // if user jumped via "find next available" we trust the backend.
+  const overlapBooking = (effectiveSlot.date === slot.date && slotEndMins !== null)
+    ? (dayBookings || []).find(b => {
+        const bStart = timeToMins(b.start_time);
+        return bStart >= slotStartMins && bStart < slotEndMins;
+      })
+    : null;
+
+  const isStaff = effectiveSlot.userId && effectiveSlot.userId !== ownerUserId;
+  const staffCol = staffColumns.find(c => c.id === effectiveSlot.userId);
+
+  // ── Find next available ────────────────────────────────────────
+  async function findNextAvailable() {
+    if (selectedEts.length === 0) return;
+    setFindingNext(true); setError('');
+    try {
+      const etIds = selectedEts.map(e => e.id).join(',');
+      const data  = isStaff
+        ? await api.getStaffNextAvailableSlot(effectiveSlot.userId, etIds)
+        : await api.getNextAvailableSlot(etIds);
+      if (data.date && data.slots?.length > 0) {
+        setEffectiveSlot(prev => ({ ...prev, date: data.date, time: data.slots[0].start_time }));
+      } else {
+        setError('No available slot found in the next 60 days for the selected services.');
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setFindingNext(false);
+    }
+  }
+
+  // ── Submit ─────────────────────────────────────────────────────
+  async function handleSubmit() {
+    if (!callerName.trim())       { setError('Customer name is required'); return; }
+    if (selectedEts.length === 0) { setError('Please select at least one service'); return; }
+    if (overlapBooking)           { return; }
+    setSubmitting(true); setError('');
+    try {
+      const created = await api.createBooking({
+        event_type_ids: selectedEts.map(e => e.id),
+        caller_name:    callerName.trim(),
+        caller_phone:   callerPhone.trim() || undefined,
+        caller_email:   callerEmail.trim() || undefined,
+        date:           effectiveSlot.date,
+        start_time:     effectiveSlot.time,
+        end_time:       endTimeStr,
+        notes:          notes.trim() || undefined,
+        ...(isStaff ? { staff_user_id: effectiveSlot.userId } : {}),
+      });
+
+      // Build a synthetic booking in the same shape getBookings returns,
+      // so the grid can update in-place without a full reload.
+      const etShape = (et) => ({ id: et.id, name: et.name, duration_minutes: et.duration_minutes, buffer_minutes: et.buffer_minutes, price_cents: et.price_cents });
+      const syntheticBooking = {
+        ...created,
+        // Single service: event_types join; multi: null (booking_event_types takes precedence)
+        event_types: selectedEts.length === 1 ? etShape(selectedEts[0]) : null,
+        // Multi-service rows (empty for single — backend only inserts when ids.length > 1)
+        booking_event_types: selectedEts.length > 1
+          ? selectedEts.map(et => ({ event_types: etShape(et) }))
+          : [],
+        profiles: staffCol ? { name: staffCol.name, role: staffCol.isOwner ? 'owner' : 'staff' } : null,
+      };
+
+      onCreated && onCreated(syntheticBooking);
+    } catch (err) {
+      setError(err.message);
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="w-96 shrink-0 bg-white border-l border-stone-200 flex flex-col overflow-hidden">
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-stone-200 flex items-start justify-between gap-2 shrink-0">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-0.5">New Appointment</p>
+          <p className="text-base font-bold text-stone-900 font-playfair truncate">Book a slot</p>
+        </div>
+        <button onClick={onClose} className="p-1 rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors shrink-0 mt-0.5">
+          <X size={15} />
+        </button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="p-5 space-y-5">
+
+          {/* Date + time info card */}
+          <div className="rounded-xl bg-stone-50 border border-stone-100 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] text-stone-400 uppercase tracking-wide mb-0.5">Date & Time</p>
+              <p className="text-sm font-semibold text-stone-800">
+                {new Date(effectiveSlot.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                {' · '}{formatTime(effectiveSlot.time)}
+                {endTimeStr && <span className="text-stone-400 font-normal"> – {formatTime(endTimeStr)}</span>}
+              </p>
+              {totalMins > 0 && (
+                <p className="text-[10px] text-stone-400 mt-0.5">
+                  {totalDuration} min{maxBuffer > 0 ? ` + ${maxBuffer} min buffer` : ''}
+                </p>
+              )}
+            </div>
+            {staffCol && (
+              <div className="flex items-center gap-1.5 shrink-0">
+                {staffCol.avatar_url
+                  ? <img src={staffCol.avatar_url} alt="" className="w-6 h-6 rounded-full object-cover" />
+                  : <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-semibold ${avatarColor(staffCol.name)}`}>{getInitials(staffCol.name)}</div>
+                }
+                <span className="text-xs text-stone-600 font-medium">{staffCol.name}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Overlap warning */}
+          {overlapBooking && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+              <p className="font-semibold mb-1">Services don't fit in this slot</p>
+              <p className="leading-relaxed mb-2">
+                The total duration ({totalMins} min) would end at {formatTime(endTimeStr)}, overlapping with{' '}
+                <span className="font-medium">{overlapBooking.caller_name || 'an appointment'}</span> at {formatTime(overlapBooking.start_time)}.
+                Remove some services so it fits, or find the next available slot.
+              </p>
+              <button
+                type="button"
+                onClick={findNextAvailable}
+                disabled={findingNext}
+                className="font-semibold text-amber-700 hover:text-amber-900 disabled:opacity-50 transition-colors"
+              >
+                {findingNext ? 'Finding…' : 'Find next available →'}
+              </button>
+            </div>
+          )}
+
+          {/* Services — multi-select */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wider">Services</p>
+              {selectedEts.length > 0 && (
+                <span className="text-[10px] font-medium text-stone-500">{selectedEts.length} selected</span>
+              )}
+            </div>
+            {etLoading ? (
+              <div className="space-y-1.5">
+                {[1,2,3].map(i => <div key={i} className="h-14 bg-stone-100 rounded-lg animate-pulse" />)}
+              </div>
+            ) : eventTypes.length === 0 ? (
+              <p className="text-xs text-stone-400 italic">No active services found.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {eventTypes.map(et => {
+                  const checked = selectedEts.some(e => e.id === et.id);
+                  return (
+                    <button
+                      key={et.id}
+                      type="button"
+                      onClick={() => toggleEt(et)}
+                      className={`w-full flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                        checked ? 'border-[#C9A96E] bg-[#C9A96E]/5' : 'border-stone-200 bg-white hover:border-stone-300'
+                      }`}
+                    >
+                      {/* Checkbox */}
+                      <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${
+                        checked ? 'border-[#C9A96E] bg-[#C9A96E]' : 'border-stone-300'
+                      }`}>
+                        {checked && (
+                          <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                          </svg>
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-semibold text-stone-800 truncate">{et.name}</p>
+                        <p className="text-[10px] text-stone-400 mt-0.5">
+                          {et.duration_minutes} min
+                          {et.buffer_minutes > 0 ? ` · ${et.buffer_minutes} min buffer` : ''}
+                          {et.price_cents > 0 ? ` · $${(et.price_cents / 100).toFixed(2)}` : ''}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Customer */}
+          <div>
+            <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wider mb-3">Customer</p>
+            <div className="space-y-2.5">
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">
+                  Name <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={callerName}
+                  onChange={e => setCallerName(e.target.value)}
+                  placeholder="Full name"
+                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">Phone</label>
+                <input
+                  type="tel"
+                  value={callerPhone}
+                  onChange={e => setCallerPhone(e.target.value)}
+                  placeholder="+1 (555) 000-0000"
+                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={callerEmail}
+                  onChange={e => setCallerEmail(e.target.value)}
+                  placeholder="customer@example.com"
+                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">
+                  Notes <span className="text-stone-400 font-normal">(optional)</span>
+                </label>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  rows={2}
+                  placeholder="Any notes for this appointment…"
+                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition resize-none"
+                />
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="shrink-0 px-5 py-3 border-t border-stone-100 bg-white space-y-2">
+        {error && <p className="text-[10px] text-red-500">{error}</p>}
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="flex-1 rounded-lg border border-stone-200 px-4 py-2 text-xs font-medium text-stone-600 hover:bg-stone-50 transition-colors disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={submitting || !callerName.trim() || selectedEts.length === 0 || !!overlapBooking}
+            className="flex-1 rounded-lg bg-stone-900 px-4 py-2 text-xs font-semibold text-white hover:bg-stone-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {submitting ? 'Creating…' : 'Create Appointment'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Right panel ───────────────────────────────────────────────────
-function RightPanel({ booking, bookings, monthCounts, staffColumns, date, view, loading, onClose }) {
+function RightPanel({ booking, newApptSlot, newApptDayBookings, bookings, monthCounts, staffColumns, date, view, loading, ownerUserId, onClose, onUpdated, onNewApptClose, onNewApptCreated }) {
+  if (newApptSlot) {
+    return <NewAppointmentPanel slot={newApptSlot} staffColumns={staffColumns} ownerUserId={ownerUserId} dayBookings={newApptDayBookings} onClose={onNewApptClose} onCreated={onNewApptCreated} />;
+  }
+
   const activeToday    = bookings;
   const pendingCount   = bookings.filter(b => b.status === 'pending').length;
   const confirmedCount = bookings.filter(b => b.status === 'confirmed').length;
@@ -517,7 +864,7 @@ function RightPanel({ booking, bookings, monthCounts, staffColumns, date, view, 
   }
 
   // Booking detail state
-  return <BookingDetailPanel booking={booking} staffColumns={staffColumns} onClose={onClose} />;
+  return <BookingDetailPanel booking={booking} staffColumns={staffColumns} onClose={onClose} onUpdated={onUpdated} />;
 }
 
 function Section({ title, children }) {
@@ -529,19 +876,43 @@ function Section({ title, children }) {
   );
 }
 
-function BookingDetailPanel({ booking, staffColumns = [], onClose }) {
-  const [notes, setNotes]           = useState([]);
-  const [notesLoading, setNotesLoading] = useState(true);
-  const [noteBody, setNoteBody]     = useState('');
+function BookingDetailPanel({ booking, staffColumns = [], onClose, onUpdated }) {
+  // Notes state
+  const [notes, setNotes]                   = useState([]);
+  const [notesLoading, setNotesLoading]     = useState(true);
+  const [noteBody, setNoteBody]             = useState('');
   const [noteSubmitting, setNoteSubmitting] = useState(false);
-  const [noteError, setNoteError]   = useState('');
-  const [payment, setPayment]       = useState(null);   // null=loading, []=none
-  const [policies, setPolicies]     = useState(undefined); // undefined=loading
+  const [noteError, setNoteError]           = useState('');
+  // Data state
+  const [payment, setPayment]   = useState(null);
+  const [policies, setPolicies] = useState(undefined);
+  // Action state
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError]     = useState('');
+  // Cancel modal
+  const [showCancelConfirm, setShowCancelConfirm]       = useState(false);
+  const [cancelReason, setCancelReason]                 = useState('');
+  const [cancelOther, setCancelOther]                   = useState('');
+  const [refundAcknowledged, setRefundAcknowledged]     = useState(false);
+  // No-show modal
+  const [showNoShowConfirm, setShowNoShowConfirm] = useState(false);
+  // Reschedule
+  const [rescheduling, setRescheduling]     = useState(false);
+  const [rescheduleDate, setRescheduleDate] = useState('');
+  const [slots, setSlots]                   = useState([]);
+  const [slotsMessage, setSlotsMessage]     = useState('');
+  const [slotsLoading, setSlotsLoading]     = useState(false);
+  const [selectedSlot, setSelectedSlot]     = useState(null);
+  const [findingNextDate, setFindingNextDate] = useState(false);
 
   useEffect(() => {
     setNotes([]); setNotesLoading(true);
     setPayment(null); setPolicies(undefined);
     setNoteBody(''); setNoteError('');
+    setActionError('');
+    setRescheduling(false);
+    setShowCancelConfirm(false);
+    setShowNoShowConfirm(false);
 
     api.getBookingNotes(booking.id)
       .then(setNotes).catch(() => {}).finally(() => setNotesLoading(false));
@@ -551,8 +922,42 @@ function BookingDetailPanel({ booking, staffColumns = [], onClose }) {
       .then(setPolicies).catch(() => setPolicies(null));
   }, [booking.id]);
 
+  // Force-close modals if booking becomes cancelled while open
+  useEffect(() => {
+    if (booking.status === 'cancelled') {
+      setRescheduling(false);
+      setShowCancelConfirm(false);
+    }
+  }, [booking.status]);
+
+  // ── Staff vs owner routing ─────────────────────────────────────
+  // bookings where user_id !== owner's id belong to a staff member
+  const ownerCol       = staffColumns.find(c => c.isOwner);
+  const isStaffBooking = !!(ownerCol && booking.user_id && booking.user_id !== ownerCol.id);
+
+  // ── Event type ID for reschedule slot fetching ─────────────────
+  // Use > 0 (not > 1): bookings created via booking_event_types path with
+  // exactly 1 service have event_type_id = null but booking_event_types[0] set.
+  const rescheduleEtId = (booking.booking_event_types?.length ?? 0) > 0
+    ? booking.booking_event_types.map(bet => bet.event_types?.id).filter(Boolean).join(',')
+    : booking.event_type_id;
+
+  // ── Timing / visibility rules ──────────────────────────────────
+  const _now     = new Date();
+  const todayStr2 = toDateStr(_now);
+  const nowTime  = _now.toTimeString().slice(0, 5);
+  const isPast   = booking.date < todayStr2 || (booking.date === todayStr2 && booking.start_time < nowTime);
+
+  const canReschedule  = !isPast && (booking.status === 'confirmed' || booking.status === 'pending');
+  const canCancel      = !isPast && (booking.status === 'confirmed' || booking.status === 'pending');
+  const canMarkNoShow  = isPast  &&  booking.status === 'confirmed';
+  const hasAnyAction   = booking.status === 'pending' || canReschedule || canCancel || canMarkNoShow;
+
+  const isPaidBooking    = Array.isArray(payment) && payment.some(a => a.status === 'succeeded' && a.metadata?.type !== 'no_show_fee');
+  const cancelReasonValid = cancelReason && (cancelReason !== 'Other' || cancelOther.trim().length > 0) && (!isPaidBooking || refundAcknowledged);
   const canAddNote = booking.status !== 'cancelled';
 
+  // ── Service info ───────────────────────────────────────────────
   const service      = getService(booking);
   const durationMins = booking.event_types?.duration_minutes
     || booking.booking_event_types?.reduce((s, x) => s + (x.event_types?.duration_minutes || 0), 0)
@@ -566,6 +971,106 @@ function BookingDetailPanel({ booking, staffColumns = [], onClose }) {
     return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   })();
 
+  // ── Actions ───────────────────────────────────────────────────
+  async function handleAction(status) {
+    setActionLoading(true); setActionError('');
+    try {
+      let updated;
+      if (status === 'cancelled') {
+        const reason = cancelReason === 'Other' ? cancelOther.trim() : cancelReason;
+        updated = isStaffBooking
+          ? await api.cancelStaffBooking(booking.user_id, booking.id, reason)
+          : await api.cancelBooking(booking.id, reason);
+      } else {
+        updated = isStaffBooking
+          ? await api.updateStaffBooking(booking.user_id, booking.id, { status })
+          : await api.updateBooking(booking.id, { status });
+      }
+      onUpdated && onUpdated(updated);
+      setActionLoading(false);
+    } catch (err) {
+      setActionError(err.message);
+      setActionLoading(false);
+    }
+  }
+
+  async function handleNoShow() {
+    setActionLoading(true); setActionError('');
+    setShowNoShowConfirm(false);
+    try {
+      const res = await api.markNoShow(booking.id);
+      onUpdated && onUpdated(res.booking || res);
+      setActionLoading(false);
+    } catch (err) {
+      setActionError(err.message);
+      setActionLoading(false);
+    }
+  }
+
+  // ── Reschedule ────────────────────────────────────────────────
+  async function loadSlots(date) {
+    if (!date) return;
+    setSlotsLoading(true); setSelectedSlot(null); setSlots([]); setSlotsMessage('');
+    try {
+      const data = isStaffBooking
+        ? await api.getStaffAvailableSlots(booking.user_id, date, rescheduleEtId, booking.id)
+        : await api.getAvailableSlots(date, rescheduleEtId, booking.id);
+      const fetched = data.slots || [];
+      setSlots(fetched);
+      setSlotsMessage(data.holiday ? `No availability — ${data.holiday}` : (data.message || ''));
+      if (date === booking.date) {
+        const cur = fetched.find(s => s.start_time.slice(0, 5) === booking.start_time.slice(0, 5));
+        setSelectedSlot(cur || null);
+      }
+    } catch (err) {
+      setActionError(err.message);
+    } finally {
+      setSlotsLoading(false);
+    }
+  }
+
+  function openReschedule() {
+    setRescheduling(true); setActionError('');
+    setRescheduleDate(booking.date);
+    loadSlots(booking.date);
+  }
+
+  async function findNextAvailable() {
+    setFindingNextDate(true); setActionError('');
+    try {
+      const data = isStaffBooking
+        ? await api.getStaffNextAvailableSlot(booking.user_id, rescheduleEtId)
+        : await api.getNextAvailableSlot(rescheduleEtId);
+      if (data.date) {
+        setRescheduleDate(data.date);
+        setSlots(data.slots || []);
+        setSlotsMessage('');
+      } else {
+        setActionError('No available slots found in the next 60 days.');
+      }
+    } catch (err) {
+      setActionError(err.message);
+    } finally {
+      setFindingNextDate(false);
+    }
+  }
+
+  async function handleReschedule() {
+    if (!selectedSlot) return;
+    setActionLoading(true); setActionError('');
+    try {
+      const payload = { date: rescheduleDate, start_time: selectedSlot.start_time, end_time: selectedSlot.end_time, status: 'confirmed' };
+      const updated = isStaffBooking
+        ? await api.updateStaffBooking(booking.user_id, booking.id, payload)
+        : await api.updateBooking(booking.id, payload);
+      onUpdated && onUpdated(updated);
+    } catch (err) {
+      setActionError(err.message);
+      setActionLoading(false);
+    }
+  }
+
+  // ── Notes ──────────────────────────────────────────────────────
   async function handleAddNote(e) {
     e.preventDefault();
     if (!noteBody.trim()) return;
@@ -582,290 +1087,577 @@ function BookingDetailPanel({ booking, staffColumns = [], onClose }) {
   }
 
   return (
-    <div className="w-96 shrink-0 bg-white border-l border-stone-200 flex flex-col overflow-hidden">
+    <div className="w-96 shrink-0 bg-white border-l border-stone-200 flex flex-col overflow-hidden relative">
 
       {/* Header */}
       <div className="px-5 py-4 border-b border-stone-200 flex items-start justify-between gap-2 shrink-0">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-0.5">Appointment</p>
-          <p className="text-base font-bold text-stone-900 font-playfair truncate">{service}</p>
+          <p className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-0.5">
+            {rescheduling ? 'Reschedule' : 'Appointment'}
+          </p>
+          <p className="text-base font-bold text-stone-900 font-playfair truncate">
+            {rescheduling ? 'Pick a new date & time' : service}
+          </p>
         </div>
         <button onClick={onClose} className="p-1 rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors shrink-0 mt-0.5">
           <X size={15} />
         </button>
       </div>
 
+      {/* Body */}
       <div className="flex-1 overflow-y-auto">
-        <div className="p-5 space-y-5">
-
-          {/* ── Customer ── */}
-          <Section title="Customer">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-stone-100 flex items-center justify-center shrink-0">
-                <span className="text-xs font-bold text-stone-600">{getInitials(booking.caller_name || '?')}</span>
+        {rescheduling ? (
+          /* ── Reschedule body ── */
+          <div className="p-5 space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs font-medium text-stone-600">Date</label>
+                <button
+                  type="button"
+                  onClick={findNextAvailable}
+                  disabled={findingNextDate || slotsLoading}
+                  className="text-xs font-medium text-[#C9A96E] hover:text-stone-700 disabled:opacity-40 transition-colors"
+                >
+                  {findingNextDate ? 'Finding…' : 'Next available →'}
+                </button>
               </div>
-              <div className="min-w-0">
-                <p className="text-sm font-semibold text-stone-800">{booking.caller_name || '—'}</p>
-                {booking.caller_phone && <p className="text-xs text-stone-400 mt-0.5">{booking.caller_phone}</p>}
-                {booking.caller_email && <p className="text-xs text-stone-400 truncate">{booking.caller_email}</p>}
-                {booking.booked_via === 'mobile_app' && (
-                  <span className="inline-flex mt-1 text-[10px] font-medium text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">Mobile app</span>
-                )}
-              </div>
-              <span className={`ml-auto shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_BADGE[booking.status] || STATUS_BADGE.confirmed}`}>
-                {STATUS_LABEL[booking.status] || booking.status}
-              </span>
+              <input
+                type="date"
+                value={rescheduleDate}
+                min={todayStr2}
+                onChange={e => { setRescheduleDate(e.target.value); setActionError(''); loadSlots(e.target.value); }}
+                className="w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-800 focus:border-[#C9A96E] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition"
+              />
             </div>
 
-            {booking.profiles?.name && (() => {
-              const staffCol = staffColumns.find(c => c.id === booking.user_id);
-              const avatarUrl = staffCol?.avatar_url || null;
-              return (
-                <div className="flex items-center gap-3 mt-3 pt-3 border-t border-stone-100">
-                  {avatarUrl
-                    ? <img src={avatarUrl} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
-                    : <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0 ${avatarColor(booking.profiles.name)}`}>
-                        {getInitials(booking.profiles.name)}
-                      </div>
-                  }
-                  <div>
-                    <p className="text-[10px] text-stone-400">Booked with</p>
-                    <p className="text-sm font-semibold text-stone-800">{booking.profiles.name}</p>
-                  </div>
-                </div>
-              );
-            })()}
-          </Section>
+            {slotsLoading && <p className="text-xs text-stone-400">Loading slots…</p>}
 
-          <div className="border-t border-stone-100" />
+            {!slotsLoading && rescheduleDate && slots.length === 0 && (
+              <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700 text-center">
+                {slotsMessage || 'No available slots on this date'}
+              </div>
+            )}
 
-          {/* ── Appointment details ── */}
-          <Section title="Appointment">
-            <div className="space-y-3">
-              {/* Service table */}
-              <div className="rounded-xl border border-stone-100 overflow-hidden text-xs">
-                <div className="grid grid-cols-3 bg-stone-50 px-3 py-2 font-semibold text-stone-400 uppercase tracking-wide text-[10px]">
-                  <span>Service</span><span className="text-right">Duration</span><span className="text-right">Price</span>
+            {slots.length > 0 && (
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1.5">Time slot</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {slots.map(slot => (
+                    <button
+                      key={slot.start_time}
+                      type="button"
+                      onClick={() => setSelectedSlot(slot)}
+                      className={`rounded-lg border py-2 text-xs font-medium transition-colors ${
+                        selectedSlot?.start_time === slot.start_time
+                          ? 'border-[#C9A96E] bg-[#C9A96E] text-white shadow-sm'
+                          : 'border-stone-200 bg-white text-stone-700 hover:border-[#C9A96E]/50 hover:text-stone-800'
+                      }`}
+                    >
+                      {formatTime(slot.start_time)}
+                    </button>
+                  ))}
                 </div>
-                {(booking.booking_event_types?.length > 0
-                  ? booking.booking_event_types.map(x => x.event_types).filter(Boolean)
-                  : booking.event_types ? [booking.event_types] : []
-                ).map((et, i) => (
-                  <div key={i} className="grid grid-cols-3 px-3 py-2 border-t border-stone-100 text-stone-700">
-                    <span className="truncate pr-2">{et.name}</span>
-                    <span className="text-right">{et.duration_minutes} min</span>
-                    <span className="text-right">{et.price_cents > 0 ? `$${(et.price_cents/100).toFixed(2)}` : '—'}</span>
-                  </div>
-                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          /* ── Normal detail body ── */
+          <div className="p-5 space-y-5">
+
+            {booking.status === 'pending' && (
+              <div className="rounded-lg bg-amber-50 border border-amber-100 px-4 py-3 text-xs text-amber-700 font-medium">
+                This appointment is awaiting your approval
+              </div>
+            )}
+
+            {/* ── Customer ── */}
+            <Section title="Customer">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-stone-100 flex items-center justify-center shrink-0">
+                  <span className="text-xs font-bold text-stone-600">{getInitials(booking.caller_name || '?')}</span>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-stone-800">{booking.caller_name || '—'}</p>
+                  {booking.caller_phone && <p className="text-xs text-stone-400 mt-0.5">{booking.caller_phone}</p>}
+                  {booking.caller_email && <p className="text-xs text-stone-400 truncate">{booking.caller_email}</p>}
+                  {booking.booked_via === 'mobile_app' && (
+                    <span className="inline-flex mt-1 text-[10px] font-medium text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">Mobile app</span>
+                  )}
+                </div>
+                <span className={`ml-auto shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_BADGE[booking.status] || STATUS_BADGE.confirmed}`}>
+                  {STATUS_LABEL[booking.status] || booking.status}
+                </span>
               </div>
 
-              {/* Date */}
-              <div>
-                <p className="text-[10px] text-stone-400 mb-0.5">Date</p>
-                <p className="text-sm text-stone-700">
-                  {new Date(booking.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-                </p>
-              </div>
-
-              {/* Timeline */}
-              <div>
-                <div className="flex items-end justify-between mb-2">
-                  <div>
-                    <p className="text-[10px] text-stone-400">Start time</p>
-                    <p className="text-sm font-semibold text-stone-700">{formatTime(booking.start_time)}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] text-stone-400">End time</p>
-                    <p className="text-sm font-semibold text-stone-700">{endTime ? formatTime(endTime) : '—'}</p>
-                  </div>
-                </div>
-
-                {bufferMins > 0 && durationMins ? (() => {
-                  const total = durationMins + bufferMins;
-                  const durPct = (durationMins / total) * 100;
-                  const bufPct = (bufferMins   / total) * 100;
-                  return (
-                    <div>
-                      <div className="flex items-center">
-                        <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
-                        <div className="flex-1 flex items-center">
-                          <div className="flex items-center" style={{ width: `${durPct}%` }}>
-                            <div className="flex-1 border-t-2 border-dashed border-[#C9A96E]/60" />
-                          </div>
-                          <div className="w-0.5 h-3 bg-stone-300 shrink-0" />
-                          <div className="flex items-center" style={{ width: `${bufPct}%` }}>
-                            <div className="flex-1 border-t-2 border-dashed border-stone-300" />
-                          </div>
+              {booking.profiles?.name && (() => {
+                const staffCol = staffColumns.find(c => c.id === booking.user_id);
+                const avatarUrl = staffCol?.avatar_url || null;
+                return (
+                  <div className="flex items-center gap-3 mt-3 pt-3 border-t border-stone-100">
+                    {avatarUrl
+                      ? <img src={avatarUrl} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+                      : <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0 ${avatarColor(booking.profiles.name)}`}>
+                          {getInitials(booking.profiles.name)}
                         </div>
-                        <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
-                      </div>
-                      <div className="flex mt-1" style={{ paddingLeft: 10, paddingRight: 10 }}>
-                        <div className="text-center text-[10px] text-stone-400" style={{ width: `${durPct}%` }}>duration</div>
-                        <div className="text-center text-[10px] text-stone-300" style={{ width: `${bufPct}%` }}>buffer</div>
-                      </div>
+                    }
+                    <div>
+                      <p className="text-[10px] text-stone-400">Booked with</p>
+                      <p className="text-sm font-semibold text-stone-800">{booking.profiles.name}</p>
                     </div>
-                  );
-                })() : (
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
-                    <div className="flex-1 border-t-2 border-dashed border-stone-300" />
-                    <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
                   </div>
-                )}
-              </div>
+                );
+              })()}
+            </Section>
 
-            </div>
-          </Section>
+            <div className="border-t border-stone-100" />
 
-          <div className="border-t border-stone-100" />
-
-          {/* ── Payment ── */}
-          <Section title="Payment">
-            {payment === null ? (
-              <div className="space-y-2 animate-pulse">
-                <div className="h-14 bg-stone-100 rounded-xl" />
-              </div>
-            ) : payment.length === 0 ? (
-              <div className="bg-stone-50 rounded-xl border border-stone-100 px-4 py-3">
-                <p className="text-xs text-stone-400 italic">No payment collected for this booking.</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {payment.map(attempt => (
-                  <div key={attempt.id} className="bg-stone-50 rounded-xl border border-stone-100 px-4 py-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold text-stone-800">
-                        {attempt.amount_cents != null ? `$${(attempt.amount_cents/100).toFixed(2)}` : '—'}
-                      </span>
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-semibold capitalize ${
-                        attempt.status === 'succeeded' ? 'bg-emerald-100 text-emerald-700'
-                        : attempt.status === 'failed'  ? 'bg-red-100 text-red-600'
-                        : 'bg-stone-100 text-stone-500'
-                      }`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${attempt.status === 'succeeded' ? 'bg-emerald-500' : attempt.status === 'failed' ? 'bg-red-400' : 'bg-stone-400'}`} />
-                        {attempt.status || 'unknown'}
-                      </span>
+            {/* ── Appointment details ── */}
+            <Section title="Appointment">
+              <div className="space-y-3">
+                <div className="rounded-xl border border-stone-100 overflow-hidden text-xs">
+                  <div className="grid grid-cols-3 bg-stone-50 px-3 py-2 font-semibold text-stone-400 uppercase tracking-wide text-[10px]">
+                    <span>Service</span><span className="text-right">Duration</span><span className="text-right">Price</span>
+                  </div>
+                  {(booking.booking_event_types?.length > 0
+                    ? booking.booking_event_types.map(x => x.event_types).filter(Boolean)
+                    : booking.event_types ? [booking.event_types] : []
+                  ).map((et, i) => (
+                    <div key={i} className="grid grid-cols-3 px-3 py-2 border-t border-stone-100 text-stone-700">
+                      <span className="truncate pr-2">{et.name}</span>
+                      <span className="text-right">{et.duration_minutes} min</span>
+                      <span className="text-right">{et.price_cents > 0 ? `$${(et.price_cents/100).toFixed(2)}` : '—'}</span>
                     </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div><p className="text-stone-400">Provider</p><p className="text-stone-700 capitalize">{attempt.provider}</p></div>
-                      <div><p className="text-stone-400">Date</p><p className="text-stone-700">{new Date(attempt.attempted_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p></div>
+                  ))}
+                </div>
+
+                <div>
+                  <p className="text-[10px] text-stone-400 mb-0.5">Date</p>
+                  <p className="text-sm text-stone-700">
+                    {new Date(booking.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                  </p>
+                </div>
+
+                <div>
+                  <div className="flex items-end justify-between mb-2">
+                    <div>
+                      <p className="text-[10px] text-stone-400">Start time</p>
+                      <p className="text-sm font-semibold text-stone-700">{formatTime(booking.start_time)}</p>
                     </div>
-                    {attempt.provider_payment_id && (
-                      <div className="text-xs"><p className="text-stone-400">Payment ID</p><p className="font-mono text-stone-600 break-all">{attempt.provider_payment_id}</p></div>
+                    <div className="text-right">
+                      <p className="text-[10px] text-stone-400">End time</p>
+                      <p className="text-sm font-semibold text-stone-700">{endTime ? formatTime(endTime) : '—'}</p>
+                    </div>
+                  </div>
+
+                  {bufferMins > 0 && durationMins ? (() => {
+                    const total = durationMins + bufferMins;
+                    const durPct = (durationMins / total) * 100;
+                    const bufPct = (bufferMins   / total) * 100;
+                    return (
+                      <div>
+                        <div className="flex items-center">
+                          <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
+                          <div className="flex-1 flex items-center">
+                            <div className="flex items-center" style={{ width: `${durPct}%` }}>
+                              <div className="flex-1 border-t-2 border-dashed border-[#C9A96E]/60" />
+                            </div>
+                            <div className="w-0.5 h-3 bg-stone-300 shrink-0" />
+                            <div className="flex items-center" style={{ width: `${bufPct}%` }}>
+                              <div className="flex-1 border-t-2 border-dashed border-stone-300" />
+                            </div>
+                          </div>
+                          <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
+                        </div>
+                        <div className="flex mt-1" style={{ paddingLeft: 10, paddingRight: 10 }}>
+                          <div className="text-center text-[10px] text-stone-400" style={{ width: `${durPct}%` }}>duration</div>
+                          <div className="text-center text-[10px] text-stone-300" style={{ width: `${bufPct}%` }}>buffer</div>
+                        </div>
+                      </div>
+                    );
+                  })() : (
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
+                      <div className="flex-1 border-t-2 border-dashed border-stone-300" />
+                      <div className="w-2.5 h-2.5 rounded-full bg-[#C9A96E] shrink-0" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Section>
+
+            <div className="border-t border-stone-100" />
+
+            {/* ── Payment ── */}
+            <Section title="Payment">
+              {payment === null ? (
+                <div className="space-y-2 animate-pulse"><div className="h-14 bg-stone-100 rounded-xl" /></div>
+              ) : payment.length === 0 ? (
+                <div className="bg-stone-50 rounded-xl border border-stone-100 px-4 py-3">
+                  <p className="text-xs text-stone-400 italic">No payment collected for this booking.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {payment.map(attempt => (
+                    <div key={attempt.id} className="bg-stone-50 rounded-xl border border-stone-100 px-4 py-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-stone-800">
+                          {attempt.amount_cents != null ? `$${(attempt.amount_cents/100).toFixed(2)}` : '—'}
+                        </span>
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-semibold capitalize ${
+                          attempt.status === 'succeeded' ? 'bg-emerald-100 text-emerald-700'
+                          : attempt.status === 'failed'  ? 'bg-red-100 text-red-600'
+                          : 'bg-stone-100 text-stone-500'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${attempt.status === 'succeeded' ? 'bg-emerald-500' : attempt.status === 'failed' ? 'bg-red-400' : 'bg-stone-400'}`} />
+                          {attempt.status || 'unknown'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div><p className="text-stone-400">Provider</p><p className="text-stone-700 capitalize">{attempt.provider}</p></div>
+                        <div><p className="text-stone-400">Date</p><p className="text-stone-700">{new Date(attempt.attempted_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p></div>
+                      </div>
+                      {attempt.provider_payment_id && (
+                        <div className="text-xs"><p className="text-stone-400">Payment ID</p><p className="font-mono text-stone-600 break-all">{attempt.provider_payment_id}</p></div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Section>
+
+            {/* ── Policies ── */}
+            {policies !== undefined && policies !== null && (policies.refund_policy_snapshot || policies.cancellation_policy_hours_snapshot != null || policies.no_show_fee_type_snapshot != null) && (
+              <>
+                <div className="border-t border-stone-100" />
+                <Section title="Policies shown at booking time">
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 space-y-2.5 text-xs text-amber-900">
+                    {policies.refund_policy_snapshot && (
+                      <div>
+                        <p className="font-semibold text-amber-700 mb-0.5">Refund policy</p>
+                        <p className="leading-relaxed">{policies.refund_policy_snapshot}</p>
+                      </div>
+                    )}
+                    {policies.cancellation_policy_hours_snapshot != null && (
+                      <div>
+                        <p className="font-semibold text-amber-700 mb-0.5">Cancellation policy</p>
+                        <p className="leading-relaxed">
+                          {policies.cancellation_fee_type_snapshot === 'percentage'
+                            ? `${policies.cancellation_fee_amount_snapshot}% fee`
+                            : `$${((policies.cancellation_fee_amount_snapshot || 0)/100).toFixed(2)} fee`
+                          } if cancelled within {policies.cancellation_policy_hours_snapshot}h
+                        </p>
+                        {policies.paid_online && <p className="mt-1 text-amber-700 italic">Paid in full — cancellation fee will not apply.</p>}
+                      </div>
+                    )}
+                    {policies.no_show_fee_type_snapshot != null && (
+                      <div>
+                        <p className="font-semibold text-amber-700 mb-0.5">No-show policy</p>
+                        <p className="leading-relaxed">
+                          {policies.no_show_fee_type_snapshot === 'percentage'
+                            ? `${policies.no_show_fee_amount_snapshot}% fee`
+                            : `$${((policies.no_show_fee_amount_snapshot || 0)/100).toFixed(2)} fee`
+                          } charged for no-shows
+                        </p>
+                        {policies.paid_online && <p className="mt-1 text-amber-700 italic">Paid in full — no-show fee will not apply.</p>}
+                      </div>
                     )}
                   </div>
-                ))}
-              </div>
+                </Section>
+              </>
             )}
-          </Section>
 
-          {/* ── Policies ── */}
-          {policies !== undefined && policies !== null && (policies.refund_policy_snapshot || policies.cancellation_policy_hours_snapshot != null || policies.no_show_fee_type_snapshot != null) && (
-            <>
-              <div className="border-t border-stone-100" />
-              <Section title="Policies shown at booking time">
-                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 space-y-2.5 text-xs text-amber-900">
-                  {policies.refund_policy_snapshot && (
-                    <div>
-                      <p className="font-semibold text-amber-700 mb-0.5">Refund policy</p>
-                      <p className="leading-relaxed">{policies.refund_policy_snapshot}</p>
-                    </div>
-                  )}
-                  {policies.cancellation_policy_hours_snapshot != null && (
-                    <div>
-                      <p className="font-semibold text-amber-700 mb-0.5">Cancellation policy</p>
-                      <p className="leading-relaxed">
-                        {policies.cancellation_fee_type_snapshot === 'percentage'
-                          ? `${policies.cancellation_fee_amount_snapshot}% fee`
-                          : `$${((policies.cancellation_fee_amount_snapshot || 0)/100).toFixed(2)} fee`
-                        } if cancelled within {policies.cancellation_policy_hours_snapshot}h
-                      </p>
-                      {policies.paid_online && <p className="mt-1 text-amber-700 italic">Paid in full — cancellation fee will not apply.</p>}
-                    </div>
-                  )}
-                  {policies.no_show_fee_type_snapshot != null && (
-                    <div>
-                      <p className="font-semibold text-amber-700 mb-0.5">No-show policy</p>
-                      <p className="leading-relaxed">
-                        {policies.no_show_fee_type_snapshot === 'percentage'
-                          ? `${policies.no_show_fee_amount_snapshot}% fee`
-                          : `$${((policies.no_show_fee_amount_snapshot || 0)/100).toFixed(2)} fee`
-                        } charged for no-shows
-                      </p>
-                      {policies.paid_online && <p className="mt-1 text-amber-700 italic">Paid in full — no-show fee will not apply.</p>}
-                    </div>
-                  )}
+            <div className="border-t border-stone-100" />
+
+            {/* ── Notes ── */}
+            <Section title="Notes">
+              {notesLoading ? (
+                <div className="space-y-2 animate-pulse">
+                  {[1,2].map(i => <div key={i} className="h-12 bg-stone-100 rounded-xl" />)}
                 </div>
-              </Section>
-            </>
-          )}
-
-          <div className="border-t border-stone-100" />
-
-          {/* ── Notes ── */}
-          <Section title="Notes">
-            {notesLoading ? (
-              <div className="space-y-2 animate-pulse">
-                {[1,2].map(i => <div key={i} className="h-12 bg-stone-100 rounded-xl" />)}
-              </div>
-            ) : notes.length > 0 ? (
-              <div className="space-y-2 mb-3">
-                {notes.map(note => (
-                  <div key={note.id} className="rounded-xl border border-stone-100 bg-stone-50 px-4 py-3">
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold shrink-0 ${avatarColor(note.author_name || '')}`}>
-                        {(note.author_name?.[0] || '?').toUpperCase()}
+              ) : notes.length > 0 ? (
+                <div className="space-y-2 mb-3">
+                  {notes.map(note => (
+                    <div key={note.id} className="rounded-xl border border-stone-100 bg-stone-50 px-4 py-3">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold shrink-0 ${avatarColor(note.author_name || '')}`}>
+                          {(note.author_name?.[0] || '?').toUpperCase()}
+                        </div>
+                        <span className="text-xs font-semibold text-stone-700">{note.author_name}</span>
+                        <span className="text-[10px] text-stone-400">
+                          {new Date(note.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at {new Date(note.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                        </span>
                       </div>
-                      <span className="text-xs font-semibold text-stone-700">{note.author_name}</span>
-                      <span className="text-[10px] text-stone-400">
-                        {new Date(note.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at {new Date(note.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
-                      </span>
+                      <p className="text-xs text-stone-700 leading-relaxed">{note.body}</p>
                     </div>
-                    <p className="text-xs text-stone-700 leading-relaxed">{note.body}</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-stone-400 italic mb-3">No notes yet.</p>
-            )}
-
-            {canAddNote && (
-              <form onSubmit={handleAddNote} className="space-y-2">
-                <textarea
-                  value={noteBody}
-                  onChange={e => setNoteBody(e.target.value)}
-                  rows={2}
-                  maxLength={280}
-                  placeholder="Add a note…"
-                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition resize-none"
-                />
-                <div className="flex items-center justify-between">
-                  <p className={`text-[10px] ${noteBody.length >= 260 ? noteBody.length >= 280 ? 'text-red-500' : 'text-amber-500' : 'text-stone-400'}`}>
-                    {280 - noteBody.length} chars left
-                  </p>
-                  <button
-                    type="submit"
-                    disabled={noteSubmitting || !noteBody.trim()}
-                    className="rounded-lg bg-stone-900 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-stone-800 transition-colors disabled:opacity-40"
-                  >
-                    {noteSubmitting ? 'Adding…' : 'Add Note'}
-                  </button>
+                  ))}
                 </div>
-                {noteError && <p className="text-[10px] text-red-500">{noteError}</p>}
-              </form>
-            )}
+              ) : (
+                <p className="text-xs text-stone-400 italic mb-3">No notes yet.</p>
+              )}
 
-            {!canAddNote && (
-              <p className="text-[10px] text-stone-400 italic">
-                Notes cannot be added to cancelled bookings.
-              </p>
-            )}
-          </Section>
+              {canAddNote && (
+                <form onSubmit={handleAddNote} className="space-y-2">
+                  <textarea
+                    value={noteBody}
+                    onChange={e => setNoteBody(e.target.value)}
+                    rows={2}
+                    maxLength={280}
+                    placeholder="Add a note…"
+                    className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none focus:ring-2 focus:ring-[#C9A96E]/10 transition resize-none"
+                  />
+                  <div className="flex items-center justify-between">
+                    <p className={`text-[10px] ${noteBody.length >= 260 ? noteBody.length >= 280 ? 'text-red-500' : 'text-amber-500' : 'text-stone-400'}`}>
+                      {280 - noteBody.length} chars left
+                    </p>
+                    <button
+                      type="submit"
+                      disabled={noteSubmitting || !noteBody.trim()}
+                      className="rounded-lg bg-stone-900 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-stone-800 transition-colors disabled:opacity-40"
+                    >
+                      {noteSubmitting ? 'Adding…' : 'Add Note'}
+                    </button>
+                  </div>
+                  {noteError && <p className="text-[10px] text-red-500">{noteError}</p>}
+                </form>
+              )}
 
-        </div>
+              {!canAddNote && (
+                <p className="text-[10px] text-stone-400 italic">Notes cannot be added to cancelled bookings.</p>
+              )}
+            </Section>
+
+          </div>
+        )}
       </div>
+
+      {/* ── Action buttons footer ── */}
+      {!rescheduling && hasAnyAction && (
+        <div className="shrink-0 px-5 py-3 border-t border-stone-100 bg-white">
+          <div className="flex flex-wrap gap-2">
+            {booking.status === 'pending' && (
+              <button
+                onClick={() => handleAction('confirmed')}
+                disabled={actionLoading}
+                className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50"
+              >
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                </svg>
+                {actionLoading ? '…' : 'Approve'}
+              </button>
+            )}
+            {canReschedule && (
+              <button
+                onClick={openReschedule}
+                disabled={actionLoading}
+                className="inline-flex items-center gap-1.5 rounded-full border border-stone-200 bg-stone-50 px-3.5 py-1.5 text-xs font-semibold text-stone-700 hover:bg-stone-100 transition-colors disabled:opacity-50"
+              >
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+                Reschedule
+              </button>
+            )}
+            {canCancel && (
+              <button
+                onClick={() => { setCancelReason(''); setCancelOther(''); setRefundAcknowledged(false); setShowCancelConfirm(true); }}
+                disabled={actionLoading}
+                className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-3.5 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50"
+              >
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+                Cancel
+              </button>
+            )}
+            {canMarkNoShow && (
+              <button
+                onClick={() => setShowNoShowConfirm(true)}
+                disabled={actionLoading}
+                className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3.5 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-100 transition-colors disabled:opacity-50"
+              >
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                </svg>
+                No-show
+              </button>
+            )}
+          </div>
+          {actionError && <p className="text-[10px] text-red-500 mt-2">{actionError}</p>}
+        </div>
+      )}
+
+      {/* ── Reschedule footer ── */}
+      {rescheduling && (
+        <div className="shrink-0 px-5 py-3 border-t border-stone-100 bg-white flex gap-2">
+          <button
+            onClick={() => { setRescheduling(false); setActionError(''); setSlots([]); setSelectedSlot(null); }}
+            disabled={actionLoading}
+            className="flex-1 rounded-lg border border-stone-200 px-4 py-2 text-xs font-medium text-stone-600 hover:bg-stone-50 transition-colors disabled:opacity-50"
+          >
+            Back
+          </button>
+          <button
+            onClick={handleReschedule}
+            disabled={actionLoading || !selectedSlot}
+            className="flex-1 rounded-lg bg-stone-900 px-4 py-2 text-xs font-semibold text-white hover:bg-stone-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {actionLoading ? 'Saving…' : 'Confirm'}
+          </button>
+          {actionError && <p className="text-[10px] text-red-500 mt-1">{actionError}</p>}
+        </div>
+      )}
+
+      {/* ── No-show confirmation modal ── */}
+      {showNoShowConfirm && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center p-5 bg-black/40">
+          <div className="w-full bg-white rounded-2xl shadow-xl overflow-hidden">
+            <div className="px-5 pt-5 pb-4 text-center">
+              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-rose-100">
+                <svg className="h-5 w-5 text-rose-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                </svg>
+              </div>
+              <h3 className="text-sm font-semibold text-stone-800">Mark as no-show?</h3>
+              <p className="mt-1 text-xs text-stone-500">
+                <span className="font-medium text-stone-700">{booking.caller_name}</span> will be marked as a no-show.
+                {booking.no_show_pm_id
+                  ? ' The no-show fee will be charged to their saved card if a policy is configured.'
+                  : ' No card is on file — collect any fee manually if applicable.'}
+              </p>
+            </div>
+            <div className="flex gap-2 px-5 pb-5">
+              <button
+                onClick={() => setShowNoShowConfirm(false)}
+                disabled={actionLoading}
+                className="flex-1 rounded-lg border border-stone-200 px-3 py-2 text-xs font-medium text-stone-600 hover:bg-stone-50 transition-colors disabled:opacity-50"
+              >
+                Go back
+              </button>
+              <button
+                onClick={handleNoShow}
+                disabled={actionLoading}
+                className="flex-1 rounded-lg bg-rose-500 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-600 transition-colors disabled:opacity-50"
+              >
+                {actionLoading ? 'Processing…' : 'Yes, no-show'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Cancel confirmation modal ── */}
+      {showCancelConfirm && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center p-5 bg-black/40">
+          <div className="w-full bg-white rounded-2xl shadow-xl overflow-hidden">
+            <div className="px-5 pt-5 pb-2">
+              <h3 className="text-sm font-semibold text-stone-800 mb-0.5">Cancel appointment?</h3>
+              <p className="text-xs text-stone-500 mb-4">This action cannot be undone.</p>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-stone-600 mb-1.5">Reason for cancellation</label>
+                  <select
+                    value={cancelReason}
+                    onChange={e => { setCancelReason(e.target.value); setCancelOther(''); }}
+                    className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 focus:border-[#C9A96E] focus:outline-none transition"
+                  >
+                    <option value="">Select a reason…</option>
+                    <option>Staff unavailable</option>
+                    <option>Business closed</option>
+                    <option>Schedule conflict</option>
+                    <option>Customer requested</option>
+                    <option>Other</option>
+                  </select>
+                </div>
+                {cancelReason === 'Other' && (
+                  <div>
+                    <input
+                      type="text"
+                      value={cancelOther}
+                      onChange={e => setCancelOther(e.target.value.slice(0, 80))}
+                      placeholder="Please specify…"
+                      className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 placeholder-stone-400 focus:border-[#C9A96E] focus:outline-none transition"
+                    />
+                    <p className={`text-right text-xs mt-1 ${cancelOther.length >= 70 ? 'text-amber-500' : 'text-stone-400'}`}>{80 - cancelOther.length}</p>
+                  </div>
+                )}
+                {isPaidBooking && (
+                  <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2.5">
+                    <p className="text-xs font-semibold text-amber-800 mb-1">This booking was paid online</p>
+                    <p className="text-xs text-amber-700 mb-2">Cancelling will not automatically refund the customer. You must issue the refund manually through your payment provider.</p>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input type="checkbox" checked={refundAcknowledged} onChange={e => setRefundAcknowledged(e.target.checked)} className="mt-0.5 shrink-0 accent-amber-600" />
+                      <span className="text-xs font-medium text-amber-800">I understand and will handle the refund</span>
+                    </label>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 px-5 py-4">
+              <button
+                onClick={() => setShowCancelConfirm(false)}
+                disabled={actionLoading}
+                className="flex-1 rounded-lg border border-stone-200 px-3 py-2 text-xs font-medium text-stone-600 hover:bg-stone-50 transition-colors disabled:opacity-50"
+              >
+                Keep it
+              </button>
+              <button
+                onClick={() => { setShowCancelConfirm(false); handleAction('cancelled'); }}
+                disabled={actionLoading || !cancelReasonValid}
+                className="flex-1 rounded-lg bg-red-500 px-3 py-2 text-xs font-semibold text-white hover:bg-red-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionLoading ? 'Cancelling…' : 'Yes, cancel'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
+}
+
+// ── Toast stack ───────────────────────────────────────────────────
+const TOAST_CONFIG = {
+  new:         { label: 'Appointment booked',   dot: 'bg-[#C9A96E]' },
+  pending:     { label: 'Approval required',    dot: 'bg-amber-400'  },
+  cancelled:   { label: 'Booking cancelled',    dot: 'bg-red-400'    },
+  rescheduled: { label: 'Booking rescheduled',  dot: 'bg-sky-400'    },
+};
+
+function ToastItem({ toast: { id, booking, type }, onDismiss }) {
+  const cfg = TOAST_CONFIG[type] || TOAST_CONFIG.new;
+  const dateLabel = new Date(booking.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  return (
+    <div className="flex items-start gap-3 bg-stone-900 text-white rounded-2xl px-4 py-3.5 shadow-2xl w-72">
+      <div className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${cfg.dot}`} style={{ marginTop: 6 }} />
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-semibold leading-snug">{cfg.label}</p>
+        <p className="text-[11px] text-stone-400 mt-0.5 leading-snug truncate">
+          {booking.caller_name || '—'}{booking.date ? ` · ${dateLabel} at ${formatTime(booking.start_time)}` : ''}
+        </p>
+      </div>
+      <button onClick={onDismiss} className="text-stone-500 hover:text-stone-300 transition-colors shrink-0 mt-0.5">
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2">
+      {toasts.map(t => <ToastItem key={t.id} toast={t} onDismiss={() => onDismiss(t.id)} />)}
+    </div>
+  );
+}
+
+function playNotificationSound() {
+  try {
+    const audio = new Audio('/sounds/notification.mp3');
+    audio.play().catch(() => {});
+  } catch {}
 }
 
 // ── Main dashboard ────────────────────────────────────────────────
@@ -881,6 +1673,10 @@ export default function Dashboard({ session, onSignOut }) {
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState(null);
   const [selected, setSelected]       = useState(null);
+  const [newApptSlot, setNewApptSlot] = useState(null);
+  const [toasts, setToasts]           = useState([]);
+  const toastTimersRef  = useRef({});
+  const recentActionsRef = useRef(new Set()); // tracks `${id}:tag` to skip SSE dupes for own actions
 
   useEffect(() => {
     api.getProfile().then(p => { setProfile(p); setWeekStaffId(session.user.id); }).catch(() => {});
@@ -893,6 +1689,12 @@ export default function Dashboard({ session, onSignOut }) {
     { id: session.user.id, name: profile.name, avatar_url: profile.avatar_url || null, isOwner: true, isToday: isToday(date) },
     ...staff.map(s => ({ id: s.id, name: s.name, avatar_url: s.avatar_url, isOwner: false, isToday: isToday(date) })),
   ] : [];
+
+  // Real-time SSE — single owner stream, token-only dep so it never re-registers on re-renders
+  useRealtimeSSE({
+    token: session.access_token,
+    onEvent: handleSSEEvent,
+  });
 
   const load = useCallback(async (d, v) => {
     setLoading(true);
@@ -926,8 +1728,109 @@ export default function Dashboard({ session, onSignOut }) {
     setView(v);
     setStaffPage(0);
     setSelected(null);
+    setNewApptSlot(null);
     setBookings([]);
     setLoading(true);
+  }
+
+  function handleBookingUpdated(updatedBooking) {
+    if (!updatedBooking?.id) {
+      setSelected(null);
+      load(date, view);
+      return;
+    }
+    // Suppress the SSE echo for this action
+    markRecentAction(updatedBooking.id, updatedBooking.status);
+
+    // Cancelled: remove from calendar and close panel
+    if (updatedBooking.status === 'cancelled') {
+      setBookings(prev => prev.filter(b => b.id !== updatedBooking.id));
+      setSelected(null);
+      return;
+    }
+
+    // Reschedule (date or time changed): reload since the block moved on the grid
+    if (selected && (updatedBooking.date !== selected.date || updatedBooking.start_time !== selected.start_time)) {
+      setSelected(null);
+      load(date, view);
+      return;
+    }
+
+    // Status-only change (approve, no-show): merge in-place — no flicker, panel stays open
+    setBookings(prev => prev.map(b =>
+      b.id === updatedBooking.id ? { ...b, status: updatedBooking.status } : b
+    ));
+    setSelected(prev => prev ? { ...prev, status: updatedBooking.status } : null);
+  }
+
+  // ── Toast helpers ─────────────────────────────────────────────
+  function showToast(booking, type = 'new') {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, booking, type }]);
+    toastTimersRef.current[id] = setTimeout(() => dismissToast(id), 4000);
+  }
+
+  function dismissToast(id) {
+    clearTimeout(toastTimersRef.current[id]);
+    delete toastTimersRef.current[id];
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }
+
+  // Mark a recent action so the SSE handler ignores it (avoids double sound/toast)
+  function markRecentAction(bookingId, tag) {
+    const key = `${bookingId}:${tag}`;
+    recentActionsRef.current.add(key);
+    setTimeout(() => recentActionsRef.current.delete(key), 6000);
+  }
+
+  // ── Silent background refresh ────────────────────────────────
+  // Fetches fresh booking data for the current view without showing the spinner.
+  async function silentRefresh() {
+    try {
+      if (view === 'month') {
+        const from = toDateStr(new Date(date.getFullYear(), date.getMonth(), 1));
+        const to   = toDateStr(new Date(date.getFullYear(), date.getMonth() + 1, 0));
+        const counts = await api.getMonthlyBookingCounts(from, to);
+        setMonthCounts(counts || {});
+      } else if (view === 'week') {
+        const days = getWeekDays(date);
+        const res = await api.getBookings({ from: days[0], to: days[6], page_size: 500 });
+        setBookings((res.bookings || []).filter(b => b.status !== 'cancelled'));
+      } else {
+        const res = await api.getBookings({ from: toDateStr(date), to: toDateStr(date), page_size: 500 });
+        setBookings((res.bookings || []).filter(b => b.status !== 'cancelled'));
+      }
+    } catch {}
+  }
+
+  // ── SSE event handler ────────────────────────────────────────
+  function handleSSEEvent(payload) {
+    const { eventType, new: nb, old: ob } = payload;
+    const visibleDates = view === 'week' ? getWeekDays(date) : [toDateStr(date)];
+
+    if (eventType === 'INSERT') {
+      if (recentActionsRef.current.has(`${nb?.id}:insert`)) return; // own creation
+      playNotificationSound();
+      showToast(nb, nb?.status === 'pending' ? 'pending' : 'new');
+      if (nb?.date && visibleDates.includes(nb.date)) silentRefresh();
+
+    } else if (eventType === 'UPDATE') {
+      const newStatus = nb?.status;
+      const oldStatus = ob?.status;
+      if (recentActionsRef.current.has(`${nb?.id}:${newStatus}`)) return; // own action
+
+      if (newStatus === 'cancelled' && oldStatus !== 'cancelled') {
+        showToast(nb, 'cancelled');
+        setBookings(prev => prev.filter(b => b.id !== nb.id));
+        if (selected?.id === nb.id) setSelected(null);
+
+      } else if (nb?.date !== ob?.date || nb?.start_time !== ob?.start_time) {
+        playNotificationSound();
+        showToast(nb, 'rescheduled');
+        const affected = [nb?.date, ob?.date].filter(Boolean);
+        if (affected.some(d => visibleDates.includes(d))) silentRefresh();
+      }
+    }
   }
 
   function goTo(delta) {
@@ -1067,12 +1970,22 @@ export default function Dashboard({ session, onSignOut }) {
               days={weekDays}
               bookings={weekStaffId ? bookings.filter(b => b.user_id === weekStaffId) : bookings}
               selected={selected}
-              onSelectBooking={setSelected}
+              onSelectBooking={(b) => { setSelected(b); setNewApptSlot(null); }}
+              onSlotClick={(slot) => { setNewApptSlot({ ...slot, userId: weekStaffId || session.user.id }); setSelected(null); }}
             />
 
           ) : (
             staffColumns.length > 0
-              ? <StaffDayGrid columns={staffColumns} bookings={bookings} selected={selected} onSelectBooking={setSelected} staffPage={staffPage} setStaffPage={setStaffPage} />
+              ? <StaffDayGrid
+                  columns={staffColumns}
+                  bookings={bookings}
+                  selected={selected}
+                  onSelectBooking={(b) => { setSelected(b); setNewApptSlot(null); }}
+                  staffPage={staffPage}
+                  setStaffPage={setStaffPage}
+                  date={toDateStr(date)}
+                  onSlotClick={(slot) => { setNewApptSlot(slot); setSelected(null); }}
+                />
               : <div className="flex-1 flex items-center justify-center"><div className="w-5 h-5 border-2 border-stone-200 border-t-[#C9A96E] rounded-full animate-spin" /></div>
           )}
         </div>
@@ -1080,15 +1993,40 @@ export default function Dashboard({ session, onSignOut }) {
         {/* Always-visible right panel */}
         <RightPanel
           booking={selected}
+          newApptSlot={newApptSlot}
+          newApptDayBookings={newApptSlot ? bookings.filter(b =>
+            b.user_id === newApptSlot.userId &&
+            b.date === newApptSlot.date &&
+            b.status !== 'cancelled' && b.status !== 'no_show'
+          ) : []}
           bookings={view === 'week' && weekStaffId ? bookings.filter(b => b.user_id === weekStaffId) : bookings}
           monthCounts={monthCounts}
           staffColumns={staffColumns}
           date={date}
           view={view}
           loading={loading}
+          ownerUserId={session.user.id}
           onClose={() => setSelected(null)}
+          onUpdated={handleBookingUpdated}
+          onNewApptClose={() => setNewApptSlot(null)}
+          onNewApptCreated={(newBooking) => {
+            setNewApptSlot(null);
+            playNotificationSound();
+            showToast(newBooking, 'new');
+            if (newBooking?.id) markRecentAction(newBooking.id, 'insert');
+            if (!newBooking?.id) { load(date, view); return; }
+            // Only merge into the visible bookings if the booking's date
+            // is actually shown in the current view — otherwise just close silently.
+            const visibleDates = view === 'week' ? weekDays : [toDateStr(date)];
+            if (visibleDates.includes(newBooking.date)) {
+              setBookings(prev => [...prev, newBooking]);
+            }
+            // If it's on a different date, do nothing — user will see it when they navigate there.
+          }}
         />
       </div>
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

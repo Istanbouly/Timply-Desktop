@@ -52,8 +52,29 @@ export const api = {
   getAvailabilitySettings: ()       => request('GET',  '/availability'),
   getStaff: ()                      => request('GET',  '/staff'),
   updateBooking: (id, data)         => request('PATCH', `/bookings/${id}`, data),
+  cancelBooking: (id, reason)       => request('DELETE', `/bookings/${id}`, { cancellation_reason: reason }),
+  markNoShow:    (id)               => request('POST', `/bookings/${id}/no-show`),
+  // Staff booking routes (owner acting on a staff member's bookings)
+  updateStaffBooking: (memberId, id, data)   => request('PATCH', `/staff/${memberId}/bookings/${id}`, data),
+  cancelStaffBooking: (memberId, id, reason) => request('DELETE', `/staff/${memberId}/bookings/${id}`, { cancellation_reason: reason }),
+  getStaffAvailableSlots: (memberId, date, eventTypeId, excludeBookingId) => {
+    const p = new URLSearchParams({ date, event_type_id: eventTypeId });
+    if (excludeBookingId) p.set('exclude_booking_id', excludeBookingId);
+    return request('GET', `/staff/${memberId}/slots?${p}`);
+  },
+  getStaffNextAvailableSlot: (memberId, eventTypeId) =>
+    request('GET', `/staff/${memberId}/next-available?event_type_id=${eventTypeId}`),
   getBookingNotes:    (id)          => request('GET',  `/bookings/${id}/notes`),
   addBookingNote:     (id, body)    => request('POST', `/bookings/${id}/notes`, { body }),
   getBookingPayment:  (id)          => request('GET',  `/bookings/${id}/payment`),
   getBookingPolicies: (id)          => request('GET',  `/bookings/${id}/policies`),
+  getAvailableSlots: (date, eventTypeId, excludeBookingId) => {
+    const p = new URLSearchParams({ date, event_type_id: eventTypeId });
+    if (excludeBookingId) p.set('exclude_booking_id', excludeBookingId);
+    return request('GET', `/availability/slots?${p}`);
+  },
+  getNextAvailableSlot: (eventTypeId) =>
+    request('GET', `/availability/next-available?event_type_id=${eventTypeId}`),
+  getEventTypes: () => request('GET', '/event-types'),
+  createBooking: (data) => request('POST', '/bookings', data),
 };
