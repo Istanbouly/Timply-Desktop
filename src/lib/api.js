@@ -30,7 +30,7 @@ async function request(method, path, body, isRetry = false) {
       return request(method, path, body, true);
     }
     // Refresh failed — session is dead, sign out
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: 'local' });
     throw new Error('Session expired. Please sign in again.');
   }
 
@@ -82,5 +82,9 @@ export const api = {
   getNotificationHistory: (offset = 0, limit = 20) =>
     request('GET', `/notifications/history?offset=${offset}&limit=${limit}`),
   resetUnreadCount: () => request('POST', '/notifications/unread/reset'),
+  searchCustomer: (q, offset = 0, limit = 20) => {
+    const p = new URLSearchParams({ q, offset, limit });
+    return request('GET', `/bookings/customer?${p}`);
+  },
   decrementUnreadCount: () => request('POST', '/notifications/unread/decrement'),
 };

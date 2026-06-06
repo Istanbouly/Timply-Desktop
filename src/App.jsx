@@ -30,7 +30,7 @@ export default function App() {
   }
 
   function handleSignOut() {
-    supabase.auth.signOut();
+    supabase.auth.signOut({ scope: 'local' });
     setToken(null);
     setSession(null);
   }

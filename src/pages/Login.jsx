@@ -37,7 +37,7 @@ export default function Login({ onLogin }) {
       const role = data.user?.app_metadata?.role;
 
       if (!BUSINESS_ROLES.includes(role)) {
-        await supabase.auth.signOut();
+        await supabase.auth.signOut({ scope: 'local' });
         setError('This app is for spa business accounts only. Customer accounts cannot sign in here.');
         return;
       }

@@ -62,9 +62,44 @@ function formatPrice(cents) {
 
 // ── Inner tab bar ─────────────────────────────────────────────────
 
-const TABS = ['Working Hours', 'Holidays', 'Services', 'Booking Settings'];
+const TABS = ['General', 'Working Hours', 'Holidays', 'Services', 'Booking Settings'];
 
 // ── Sub-views ─────────────────────────────────────────────────────
+
+function Field({ label, value, mono = false }) {
+  return (
+    <div className="flex items-start px-5 py-4 border-b border-stone-100 last:border-0">
+      <span className="text-xs text-stone-400 w-40 shrink-0 pt-0.5">{label}</span>
+      <span className={`text-sm text-stone-800 flex-1 break-all ${mono ? 'font-mono text-xs' : ''}`}>
+        {value || <span className="text-stone-300">—</span>}
+      </span>
+    </div>
+  );
+}
+
+function GeneralTab({ profile }) {
+  if (!profile) return <Spinner />;
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-100 bg-stone-50">
+          <p className="text-[11px] font-semibold text-stone-500 uppercase tracking-wider">Personal Information</p>
+        </div>
+        <Field label="Full Name"    value={profile.name} />
+        <Field label="Booking Slug" value={profile.booking_slug} mono />
+        <Field label="Email"        value={profile.email} />
+        <Field label="Timezone"     value={profile.timezone} />
+      </div>
+      <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
+        <div className="px-5 py-3 border-b border-stone-100 bg-stone-50">
+          <p className="text-[11px] font-semibold text-stone-500 uppercase tracking-wider">Business</p>
+        </div>
+        <Field label="Business Address" value={profile.business_address} />
+        <Field label="Business Phone"   value={profile.business_phone} />
+      </div>
+    </div>
+  );
+}
 
 function AvailabilityTab({ data, loading }) {
   if (loading) return <Spinner />;
@@ -363,7 +398,7 @@ function buildPortalUrl(slug) {
 }
 
 export default function Settings({ onBack, slug, profile }) {
-  const [activeTab, setActiveTab] = useState('Working Hours');
+  const [activeTab, setActiveTab] = useState('General');
   const [availability, setAvailability] = useState(null);
   const [holidays, setHolidays] = useState(null);
   const [services, setServices] = useState(null);
@@ -429,12 +464,14 @@ export default function Settings({ onBack, slug, profile }) {
           <div className="mb-5">
             <h1 className="text-xl font-bold text-stone-800">{activeTab}</h1>
             <p className="text-xs text-stone-400 mt-1">
+              {activeTab === 'General'          && 'Your account and business details.'}
               {activeTab === 'Working Hours'    && 'Your weekly schedule — days and hours you accept bookings.'}
               {activeTab === 'Holidays'         && 'Dates your business is closed. Bookings are blocked for all staff on these days.'}
               {activeTab === 'Services'         && 'Appointment types available on your booking page.'}
               {activeTab === 'Booking Settings' && 'Configuration for how your booking page behaves.'}
             </p>
           </div>
+          {activeTab === 'General'          && <GeneralTab        profile={profile} />}
           {activeTab === 'Working Hours'    && <AvailabilityTab   data={availability} loading={loading['Working Hours']} />}
           {activeTab === 'Holidays'         && <HolidaysTab       data={holidays}     loading={loading['Holidays']} />}
           {activeTab === 'Services'         && <ServicesTab       data={services}     loading={loading['Services']} />}

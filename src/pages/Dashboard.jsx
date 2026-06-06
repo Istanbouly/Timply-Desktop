@@ -6,6 +6,8 @@ import {
   LogOut, X, Settings as SettingsIcon, Bell
 } from 'lucide-react';
 import Settings from './Settings';
+import StaffPage from './StaffPage';
+import CustomersPage from './CustomersPage';
 
 // ── Constants ─────────────────────────────────────────────────────
 const SLOT_MINS       = 30;
@@ -243,6 +245,162 @@ function NowIndicator() {
       <div className="flex items-center">
         <div className="w-2 h-2 rounded-full bg-[#C9A96E] shrink-0 -ml-1" />
         <div className="flex-1 border-t-2 border-[#C9A96E]" />
+      </div>
+    </div>
+  );
+}
+
+// ── Now service table ─────────────────────────────────────────────
+function StaffRow({ col, booking, dot }) {
+  return (
+    <div className="flex items-center gap-3 px-3 py-3">
+      <div className="w-28 shrink-0 flex items-center gap-2 min-w-0">
+        {col.avatar_url
+          ? <img src={col.avatar_url} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
+          : <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold shrink-0 ${avatarColor(col.name)}`}>
+              {getInitials(col.name)}
+            </div>
+        }
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold text-stone-700 truncate leading-none">{col.name}</p>
+          {col.isOwner && <p className="text-[9px] text-[#C9A96E] leading-none mt-0.5">Owner</p>}
+        </div>
+      </div>
+      <div className="w-px h-8 bg-stone-100 shrink-0" />
+      {booking ? (
+        <div className="flex-1 min-w-0 flex items-center gap-2">
+          <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold text-stone-800 truncate leading-none">{booking.caller_name || 'Guest'}</p>
+            <p className="text-[9px] text-stone-400 truncate mt-0.5">{booking._timeLabel ? `${booking._timeLabel} · ` : ''}{getService(booking)}</p>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center gap-2">
+          <div className="w-1.5 h-1.5 rounded-full bg-stone-200 shrink-0" />
+          <p className="text-[11px] text-stone-400 italic">{booking === null ? 'Unoccupied' : 'No bookings'}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NowServiceTable({ staffColumns, bookings, availSettings }) {
+  const [nowMins, setNowMins] = useState(() => {
+    const n = new Date(); return n.getHours() * 60 + n.getMinutes();
+  });
+  const [nextBookings, setNextBookings] = useState(null); // null = not loaded yet
+  const [nextDate, setNextDate]         = useState(null);
+  const [fetching, setFetching]         = useState(false);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const n = new Date(); setNowMins(n.getHours() * 60 + n.getMinutes());
+    }, 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  const todayDow     = new Date().getDay(); // 0 = Sunday
+  const todaySetting = availSettings.find(s => s.day_of_week === todayDow);
+  const isAfterHours = !todaySetting?.enabled
+    || nowMins < timeToMins(todaySetting.start_time)
+    || nowMins >= timeToMins(todaySetting.end_time);
+
+  // When after hours, find the next working day that has bookings
+  useEffect(() => {
+    if (!isAfterHours) { setNextBookings(null); setNextDate(null); return; }
+    let cancelled = false;
+    async function fetchNext() {
+      setFetching(true);
+      const today = new Date();
+      for (let i = 1; i <= 7; i++) {
+        const d = new Date(today);
+        d.setDate(today.getDate() + i);
+        const ds = toDateStr(d);
+        try {
+          const res = await api.getBookings({ from: ds, to: ds, page_size: 500 });
+          const bks = (res.bookings || []).filter(b => !['cancelled', 'no_show'].includes(b.status));
+          if (cancelled) return;
+          if (bks.length > 0) { setNextBookings(bks); setNextDate(ds); break; }
+        } catch {}
+      }
+      if (!cancelled) setFetching(false);
+    }
+    fetchNext();
+    return () => { cancelled = true; };
+  }, [isAfterHours]);
+
+  const nowLabel = (() => {
+    const h = Math.floor(nowMins / 60), m = nowMins % 60;
+    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+  })();
+
+  // ── After hours: show upcoming from next working day ──────────────
+  if (isAfterHours) {
+    const dateLabel = nextDate
+      ? new Date(nextDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+      : null;
+
+    const rows = staffColumns.map(col => {
+      const booking = (nextBookings || [])
+        .filter(b => b.user_id === col.id)
+        .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''))[0] || undefined;
+      // undefined = not yet loaded; null = no bookings for this staff
+      const resolved = nextBookings !== null ? (booking || null) : undefined;
+      const withLabel = resolved ? { ...resolved, _timeLabel: formatTime(resolved.start_time) } : resolved;
+      return { col, booking: withLabel };
+    });
+
+    return (
+      <div className="flex-1 overflow-y-auto px-4 pb-4">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wider">Upcoming</p>
+          {dateLabel && <span className="text-[10px] font-medium text-[#C9A96E]">{dateLabel}</span>}
+        </div>
+        {fetching ? (
+          <div className="flex justify-center py-6">
+            <div className="w-4 h-4 border-2 border-stone-200 border-t-[#C9A96E] rounded-full animate-spin" />
+          </div>
+        ) : (
+          <div className="rounded-xl border border-stone-200 overflow-hidden">
+            {rows.map((row, i) => (
+              <div key={row.col.id} className={i > 0 ? 'border-t border-stone-100' : ''}>
+                <StaffRow col={row.col} booking={row.booking} dot="bg-[#C9A96E]" />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Within hours: show who's currently being served ───────────────
+  const rows = staffColumns.map(col => {
+    const booking = bookings.find(b => {
+      if (b.user_id !== col.id) return false;
+      if (['cancelled', 'no_show'].includes(b.status)) return false;
+      const start = timeToMins(b.start_time);
+      const duration = b.event_types?.duration_minutes
+        || b.booking_event_types?.reduce((s, x) => s + (x.event_types?.duration_minutes || 0), 0)
+        || 60;
+      const end = b.end_time ? timeToMins(b.end_time) : start + duration;
+      return nowMins >= start && nowMins < end;
+    }) || null;
+    return { col, booking };
+  });
+
+  return (
+    <div className="flex-1 overflow-y-auto px-4 pb-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wider">Now Serving</p>
+        <span className="text-[10px] font-medium text-[#C9A96E]">{nowLabel}</span>
+      </div>
+      <div className="rounded-xl border border-stone-200 overflow-hidden">
+        {rows.map((row, i) => (
+          <div key={row.col.id} className={i > 0 ? 'border-t border-stone-100' : ''}>
+            <StaffRow col={row.col} booking={row.booking} dot="bg-emerald-400" />
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -868,7 +1026,7 @@ function NewAppointmentPanel({ slot, staffColumns, ownerUserId, dayBookings, onC
 }
 
 // ── Right panel ───────────────────────────────────────────────────
-function RightPanel({ booking, newApptSlot, newApptDayBookings, bookings, monthCounts, staffColumns, date, view, loading, ownerUserId, onClose, onUpdated, onNewApptClose, onNewApptCreated }) {
+function RightPanel({ booking, newApptSlot, newApptDayBookings, bookings, monthCounts, staffColumns, availSettings, date, view, loading, ownerUserId, onClose, onUpdated, onNewApptClose, onNewApptCreated }) {
   if (newApptSlot) {
     return <NewAppointmentPanel slot={newApptSlot} staffColumns={staffColumns} ownerUserId={ownerUserId} dayBookings={newApptDayBookings} onClose={onNewApptClose} onCreated={onNewApptCreated} />;
   }
@@ -926,24 +1084,28 @@ function RightPanel({ booking, newApptSlot, newApptDayBookings, bookings, monthC
           </div>
         </div>
 
-        {activeToday.length > 0 && (
-          <div className="flex-1 overflow-y-auto px-4 pb-4">
-            <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wider mb-2">Upcoming</p>
-            <div className="space-y-1.5">
-              {activeToday
-                .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''))
-                .slice(0, 8)
-                .map(b => (
-                  <div key={b.id} className="flex items-center gap-2 py-1.5">
-                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${b.status === 'pending' ? 'bg-amber-400' : 'bg-[#C9A96E]'}`} />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-medium text-stone-700 truncate">{b.caller_name || 'Guest'}</p>
-                      <p className="text-[10px] text-stone-400 truncate">{formatTime(b.start_time)} · {getService(b)}</p>
+        {view === 'day' && isToday(date) ? (
+          <NowServiceTable staffColumns={staffColumns} bookings={activeToday} availSettings={availSettings} />
+        ) : (
+          activeToday.length > 0 && (
+            <div className="flex-1 overflow-y-auto px-4 pb-4">
+              <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wider mb-2">Upcoming</p>
+              <div className="space-y-1.5">
+                {activeToday
+                  .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''))
+                  .slice(0, 8)
+                  .map(b => (
+                    <div key={b.id} className="flex items-center gap-2 py-1.5">
+                      <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${b.status === 'pending' ? 'bg-amber-400' : 'bg-[#C9A96E]'}`} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-stone-700 truncate">{b.caller_name || 'Guest'}</p>
+                        <p className="text-[10px] text-stone-400 truncate">{formatTime(b.start_time)} · {getService(b)}</p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+              </div>
             </div>
-          </div>
+          )
         )}
 
         {activeToday.length === 0 && (
@@ -1833,7 +1995,7 @@ function NotifRow({ notif, onClick }) {
 
 // ── Main dashboard ────────────────────────────────────────────────
 export default function Dashboard({ session, onSignOut }) {
-  const [page, setPage]               = useState('calendar'); // 'calendar' | 'settings'
+  const [page, setPage]               = useState('calendar'); // 'calendar' | 'staff' | 'customers' | 'settings'
   const [notifOpen, setNotifOpen]     = useState(false);
   const [notifList, setNotifList]     = useState([]);
   const [notifHasMore, setNotifHasMore] = useState(false);
@@ -1856,6 +2018,7 @@ export default function Dashboard({ session, onSignOut }) {
   const [selected, setSelected]       = useState(null);
   const [newApptSlot, setNewApptSlot] = useState(null);
   const [toasts, setToasts]           = useState([]);
+  const [availSettings, setAvailSettings] = useState([]);
   const toastTimersRef  = useRef({});
   const recentActionsRef = useRef(new Set()); // tracks `${id}:tag` to skip SSE dupes for own actions
 
@@ -1865,6 +2028,7 @@ export default function Dashboard({ session, onSignOut }) {
     api.getStaff().then(res => {
       setStaff((res.staff || []).filter(s => s.status === 'active'));
     }).catch(() => {});
+    api.getAvailabilitySettings().then(res => setAvailSettings(res || [])).catch(() => {});
   }, []);
 
   const staffColumns = profile ? [
@@ -2152,6 +2316,19 @@ export default function Dashboard({ session, onSignOut }) {
       {/* Top bar */}
       <div data-tauri-drag-region className="h-12 bg-white border-b border-stone-200 flex items-center px-5 gap-3 shrink-0">
         <img src="/timply-logo.svg" alt="Timply" className="h-5 w-auto" />
+        <div className="w-px h-4 bg-stone-200 mx-1" />
+        {[['calendar','Dashboard'],['staff','Staff'],['customers','Customers']].map(([p, label]) => (
+          <button
+            key={p}
+            onClick={() => setPage(p)}
+            style={{ WebkitAppRegion: 'no-drag' }}
+            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
+              page === p ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-800 hover:bg-stone-100'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
         <div className="flex-1" />
         {profile && (
           <div className="flex items-center gap-2">
@@ -2250,6 +2427,14 @@ export default function Dashboard({ session, onSignOut }) {
           profile={profile}
         />
       )}
+
+      {/* Staff page */}
+      {page === 'staff' && (
+        <StaffPage staff={staff} profile={profile} ownerUserId={session.user.id} />
+      )}
+
+      {/* Customers page */}
+      {page === 'customers' && <CustomersPage />}
 
       {/* Toolbar */}
       {page === 'calendar' &&
@@ -2396,6 +2581,7 @@ export default function Dashboard({ session, onSignOut }) {
           bookings={view === 'week' && weekStaffId ? bookings.filter(b => b.user_id === weekStaffId) : bookings}
           monthCounts={monthCounts}
           staffColumns={staffColumns}
+          availSettings={availSettings}
           date={date}
           view={view}
           loading={loading}
